@@ -68,6 +68,7 @@ function safeReason(reason, moderatorTag) {
 function defaultLogEvents() {
   return {
     BAN: true,
+    UNBAN: true,
     TIMEOUT: true,
     UNTIMEOUT: true,
     WARN: true,
@@ -158,6 +159,53 @@ function createModerationService({ pool, config }) {
           .setName('dm')
           .setDescription("Envoyer un MP à la cible avant le ban")
           .setRequired(false)
+      ),
+
+
+    // /unban
+    new SlashCommandBuilder()
+      .setName('unban')
+      .setDescription('Débannir un utilisateur (par ID)')
+      .addStringOption((opt) =>
+        opt
+          .setName('user_id')
+          .setDescription('ID Discord de la personne bannie')
+          .setRequired(true)
+      )
+      .addStringOption((opt) =>
+        opt
+          .setName('raison')
+          .setDescription('Raison du déban')
+          .setRequired(false)
+          .setMaxLength(300)
+      ),
+
+    // /banlist
+    new SlashCommandBuilder()
+      .setName('banlist')
+      .setDescription('Liste des utilisateurs bannis')
+      .addIntegerOption((opt) =>
+        opt
+          .setName('page')
+          .setDescription('Page (par défaut: 1)')
+          .setMinValue(1)
+          .setMaxValue(100)
+          .setRequired(false)
+      )
+      .addIntegerOption((opt) =>
+        opt
+          .setName('limit')
+          .setDescription('Bannis par page (1-25, défaut: 10)')
+          .setMinValue(1)
+          .setMaxValue(25)
+          .setRequired(false)
+      )
+      .addStringOption((opt) =>
+        opt
+          .setName('recherche')
+          .setDescription('Filtrer par tag/nom/ID')
+          .setRequired(false)
+          .setMaxLength(100)
       ),
 
     // /timeout
@@ -289,6 +337,39 @@ function createModerationService({ pool, config }) {
           .setMaxLength(200)
       ),
 
+
+    // /clear (alias de /purge)
+    new SlashCommandBuilder()
+      .setName('clear')
+      .setDescription('Alias de /purge : supprime des messages dans le salon courant')
+      .addIntegerOption((opt) =>
+        opt
+          .setName('nombre')
+          .setDescription('Nombre de messages à supprimer (1-100)')
+          .setMinValue(1)
+          .setMaxValue(100)
+          .setRequired(true)
+      )
+      .addUserOption((opt) =>
+        opt
+          .setName('cible')
+          .setDescription("Ne supprimer que les messages de cet utilisateur")
+          .setRequired(false)
+      )
+      .addBooleanOption((opt) =>
+        opt
+          .setName('inclure_bots')
+          .setDescription('Inclure les messages des bots (par défaut: oui)')
+          .setRequired(false)
+      )
+      .addStringOption((opt) =>
+        opt
+          .setName('raison')
+          .setDescription('Raison (recommandée)')
+          .setRequired(false)
+          .setMaxLength(200)
+      ),
+
     // /log
     new SlashCommandBuilder()
       .setName('log')
@@ -333,6 +414,7 @@ function createModerationService({ pool, config }) {
               .setRequired(true)
               .addChoices(
                 { name: 'BAN', value: 'BAN' },
+                { name: 'UNBAN', value: 'UNBAN' },
                 { name: 'TIMEOUT', value: 'TIMEOUT' },
                 { name: 'UNTIMEOUT', value: 'UNTIMEOUT' },
                 { name: 'WARN', value: 'WARN' },
@@ -391,6 +473,7 @@ function createModerationService({ pool, config }) {
               .addChoices(
                 { name: 'TOUT', value: 'ALL' },
                 { name: 'BAN', value: 'BAN' },
+                { name: 'UNBAN', value: 'UNBAN' },
                 { name: 'TIMEOUT', value: 'TIMEOUT' },
                 { name: 'UNTIMEOUT', value: 'UNTIMEOUT' },
                 { name: 'WARN', value: 'WARN' },
@@ -711,6 +794,260 @@ function createModerationService({ pool, config }) {
       return true;
     }
   }
+
+
+  async function handleUnban(interaction, client) {
+    const settings = await getSettings(interaction.guildId);
+
+    if (
+      !hasAnyPermission(interaction, PermissionsBitField.Flags.BanMembers) &&
+      !isAdmin(interaction)
+    ) {
+      await interaction.reply({
+        content: '⛔ Il faut la permission **Bannir des membres** pour faire ça.',
+        ephemeral: true,
+      });
+      return true;
+    }
+
+    const guild = interaction.guild;
+    if (!guild) {
+      await interaction.reply({ content: '⚠️ Serveur introuvable.', ephemeral: true });
+      return true;
+    }
+
+    const rawId = (interaction.options.getString('user_id', true) || '').trim();
+    const userId = rawId.replace(/[<@!>]/g, '').trim();
+
+    if (!/^\d{15,21}$/.test(userId)) {
+      await interaction.reply({
+        content: '⚠️ ID invalide. (Active le mode dev → copier l’ID)',
+        ephemeral: true,
+      });
+      return true;
+    }
+
+    const reason = interaction.options.getString('raison') || 'Déban';
+    const moderatorTag = fmtUserTag(interaction.user, interaction.user.tag);
+    const apiReason = safeReason(reason, moderatorTag);
+
+    await interaction.deferReply({ ephemeral: true });
+
+    const ban = await guild.bans.fetch(userId).catch(() => null);
+    if (!ban) {
+      await interaction.editReply("⚠️ Cet utilisateur n’est pas banni (ou ID introuvable).");
+      return true;
+    }
+
+    const unbannedUser = await guild.members.unban(userId, apiReason).catch(() => null);
+    if (!unbannedUser) {
+      await interaction.editReply('⚠️ Impossible de débannir (permissions/erreur API).');
+      return true;
+    }
+
+    const logEmbed = redEmbed()
+      .setTitle('✅ MOD — UNBAN')
+      .addFields(
+        {
+          name: 'Cible',
+          value: `${fmtUserTag(ban.user, ban.user?.tag)} (${userId})`,
+          inline: false,
+        },
+        { name: 'Modérateur', value: `<@${interaction.user.id}>`, inline: true },
+        { name: 'Raison', value: reason, inline: false }
+      );
+
+    let logMsg = null;
+    if (settings.log_events?.UNBAN) {
+      logMsg = await sendModLog(guild, settings, logEmbed);
+    }
+
+    const caseId = await insertCase({
+      guildId: interaction.guildId,
+      action: 'UNBAN',
+      targetId: userId,
+      targetTag: ban.user?.tag || null,
+      moderatorId: interaction.user.id,
+      moderatorTag,
+      reason,
+      durationMs: null,
+      metadata: {},
+      logChannelId: logMsg ? logMsg.channelId : settings.modlog_channel_id || null,
+      logMessageId: logMsg ? logMsg.id : null,
+    });
+
+    if (logMsg) {
+      const updated = EmbedBuilder.from(logEmbed).addFields({
+        name: 'Case ID',
+        value: `#${caseId}`,
+        inline: true,
+      });
+      await logMsg.edit({ embeds: [updated] }).catch(() => {});
+    }
+
+    await interaction.editReply(`✅ Déban effectué. Case **#${caseId}**.`);
+    return true;
+  }
+
+  async function handleBanlist(interaction, client) {
+    const settings = await getSettings(interaction.guildId);
+
+    if (
+      !hasAnyPermission(interaction, PermissionsBitField.Flags.BanMembers) &&
+      !isAdmin(interaction)
+    ) {
+      await interaction.reply({
+        content: '⛔ Il faut la permission **Bannir des membres** pour faire ça.',
+        ephemeral: true,
+      });
+      return true;
+    }
+
+    const guild = interaction.guild;
+    if (!guild) {
+      await interaction.reply({ content: '⚠️ Serveur introuvable.', ephemeral: true });
+      return true;
+    }
+
+    const pageRaw = interaction.options.getInteger('page') ?? 1;
+    const limitRaw = interaction.options.getInteger('limit') ?? 10;
+    const search = (interaction.options.getString('recherche') || '').trim().toLowerCase();
+
+    const limit = Math.max(1, Math.min(25, limitRaw));
+    let page = Math.max(1, pageRaw);
+
+    await interaction.deferReply({ ephemeral: true });
+
+    const bans = await guild.bans.fetch().catch(() => null);
+    if (!bans) {
+      await interaction.editReply('⚠️ Impossible de récupérer la liste des bannis.');
+      return true;
+    }
+
+    let items = Array.from(bans.values());
+    if (search) {
+      items = items.filter((b) => {
+        const tag = (b.user?.tag || '').toLowerCase();
+        const username = (b.user?.username || '').toLowerCase();
+        const id = (b.user?.id || '').toLowerCase();
+        return tag.includes(search) || username.includes(search) || id.includes(search);
+      });
+    }
+
+    const total = items.length;
+    if (!total) {
+      await interaction.editReply(search ? 'Aucun banni ne correspond à ta recherche.' : 'Aucun utilisateur banni.');
+      return true;
+    }
+
+    const pages = Math.max(1, Math.ceil(total / limit));
+    if (page > pages) page = pages;
+
+    const start = (page - 1) * limit;
+    const slice = items.slice(start, start + limit);
+
+    const lines = slice.map((b, i) => {
+      const u = b.user;
+      const tag = fmtUserTag(u, u?.tag);
+      const id = u?.id || '—';
+      const r = (b.reason || '—').toString().replace(/\s+/g, ' ').trim();
+      const shortReason = r.length > 80 ? r.slice(0, 77) + '…' : r;
+      return `**${start + i + 1}.** ${tag} (\`${id}\`) — ${shortReason}`;
+    });
+
+    let desc = lines.join('\n');
+    if (desc.length > 4090) desc = desc.slice(0, 4087) + '…';
+
+    const embed = redEmbed()
+      .setTitle(`⛔ Ban list — ${total} banni(s)${search ? ` (filtre: ${search})` : ''}`)
+      .setDescription(desc)
+      .setFooter({ text: `Page ${page}/${pages} • ${limit}/page` });
+
+    await interaction.editReply({ embeds: [embed] });
+    return true;
+  }
+
+  async function handleMessage(message, client) {
+    try {
+      if (!message || message.author?.bot) return false;
+      if (!message.guild || !message.member) return false;
+
+      const content = String(message.content || '');
+      if (!content.startsWith('.')) return false;
+
+      const parts = content.slice(1).trim().split(/\s+/);
+      const cmd = (parts.shift() || '').toLowerCase();
+
+      if (cmd !== 'banlist' && cmd !== 'bl') return false;
+
+      // Permission: ban
+      const can =
+        message.member.permissions.has(PermissionsBitField.Flags.BanMembers) ||
+        message.member.permissions.has(PermissionsBitField.Flags.Administrator);
+      if (!can) {
+        await message.reply('⛔ Il faut la permission **Bannir des membres** pour faire ça.');
+        return true;
+      }
+
+      let page = 1;
+      if (parts[0] && /^\d+$/.test(parts[0])) page = Math.max(1, Number(parts.shift()));
+
+      const search = parts.join(' ').trim().toLowerCase();
+
+      const bans = await message.guild.bans.fetch().catch(() => null);
+      if (!bans) {
+        await message.reply('⚠️ Impossible de récupérer la liste des bannis.');
+        return true;
+      }
+
+      let items = Array.from(bans.values());
+      if (search) {
+        items = items.filter((b) => {
+          const tag = (b.user?.tag || '').toLowerCase();
+          const username = (b.user?.username || '').toLowerCase();
+          const id = (b.user?.id || '').toLowerCase();
+          return tag.includes(search) || username.includes(search) || id.includes(search);
+        });
+      }
+
+      const total = items.length;
+      if (!total) {
+        await message.reply(search ? 'Aucun banni ne correspond à ta recherche.' : 'Aucun utilisateur banni.');
+        return true;
+      }
+
+      const limit = 10;
+      const pages = Math.max(1, Math.ceil(total / limit));
+      if (page > pages) page = pages;
+
+      const start = (page - 1) * limit;
+      const slice = items.slice(start, start + limit);
+
+      const lines = slice.map((b, i) => {
+        const u = b.user;
+        const tag = fmtUserTag(u, u?.tag);
+        const id = u?.id || '—';
+        const r = (b.reason || '—').toString().replace(/\s+/g, ' ').trim();
+        const shortReason = r.length > 80 ? r.slice(0, 77) + '…' : r;
+        return `**${start + i + 1}.** ${tag} (\`${id}\`) — ${shortReason}`;
+      });
+
+      let desc = lines.join('\n');
+      if (desc.length > 4090) desc = desc.slice(0, 4087) + '…';
+
+      const embed = redEmbed()
+        .setTitle(`⛔ Ban list — ${total} banni(s)${search ? ` (filtre: ${search})` : ''}`)
+        .setDescription(desc)
+        .setFooter({ text: `Page ${page}/${pages} • .banlist [page] [recherche]` });
+
+      await message.reply({ embeds: [embed] });
+      return true;
+    } catch (e) {
+      console.error('banlist prefix handler fatal:', e);
+      return true;
+    }
+  }
+
 
   async function handleTimeout(interaction, client) {
     const settings = await getSettings(interaction.guildId);
@@ -1383,9 +1720,11 @@ function createModerationService({ pool, config }) {
     const name = interaction.commandName;
 
     if (name === 'ban') return handleBan(interaction, client);
+    if (name === 'unban') return handleUnban(interaction, client);
+    if (name === 'banlist') return handleBanlist(interaction, client);
     if (name === 'timeout') return handleTimeout(interaction, client);
     if (name === 'warn') return handleWarn(interaction, client);
-    if (name === 'purge') return handlePurge(interaction, client);
+    if (name === 'purge' || name === 'clear') return handlePurge(interaction, client);
     if (name === 'log') return handleLog(interaction, client);
 
     return false;
@@ -1394,6 +1733,7 @@ function createModerationService({ pool, config }) {
   return {
     commands,
     handleInteraction,
+    handleMessage,
   };
 }
 
