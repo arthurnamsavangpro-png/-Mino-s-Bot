@@ -130,6 +130,23 @@ async function registerCommands() {
     new SlashCommandBuilder()
       .setName("removevouchboard")
       .setDescription("Désactive la mise à jour auto du classement des vouchs"),
+
+    new SlashCommandBuilder()
+      .setName("rankup")
+      .setDescription("Promouvoir un membre (commande de modération)")
+      .addUserOption((opt) =>
+        opt.setName("membre").setDescription("Le membre à promouvoir").setRequired(true)
+      )
+      .addRoleOption((opt) =>
+        opt.setName("role").setDescription("Le rôle à ajouter").setRequired(true)
+      )
+      .addStringOption((opt) =>
+        opt
+          .setName("raison")
+          .setDescription("Raison du rankup (optionnel)")
+          .setRequired(false)
+          .setMaxLength(200)
+      ),
   ].map((c) => c.toJSON());
 
   const rest = new REST({ version: "10" }).setToken(TOKEN);
@@ -321,6 +338,91 @@ client.on("interactionCreate", async (interaction) => {
     return interaction.reply({
       content: "✅ Vouchboard désactivé (plus de mises à jour auto).",
       ephemeral: true,
+    });
+  }
+
+  // /rankup
+  if (interaction.commandName === "rankup") {
+    if (!interaction.guild) {
+      return interaction.reply({
+        content: "⚠️ Cette commande marche dans un serveur.",
+        ephemeral: true,
+      });
+    }
+
+    if (
+      !interaction.memberPermissions ||
+      !interaction.memberPermissions.has(PermissionsBitField.Flags.ManageRoles)
+    ) {
+      return interaction.reply({
+        content: "⛔ Il faut la permission **Gérer les rôles** pour faire ça.",
+        ephemeral: true,
+      });
+    }
+
+    const targetUser = interaction.options.getUser("membre", true);
+    const role = interaction.options.getRole("role", true);
+    const reason = interaction.options.getString("raison") || "Aucune raison précisée";
+
+    const me = interaction.guild.members.me;
+    if (!me || !me.permissions.has(PermissionsBitField.Flags.ManageRoles)) {
+      return interaction.reply({
+        content: "⛔ Je n'ai pas la permission **Gérer les rôles**.",
+        ephemeral: true,
+      });
+    }
+
+    if (role.managed) {
+      return interaction.reply({
+        content: "⚠️ Ce rôle est géré par une intégration et ne peut pas être attribué.",
+        ephemeral: true,
+      });
+    }
+
+    if (role.position >= me.roles.highest.position) {
+      return interaction.reply({
+        content: "⛔ Je ne peux pas attribuer ce rôle (hiérarchie trop élevée).",
+        ephemeral: true,
+      });
+    }
+
+    const executorMember = await interaction.guild.members
+      .fetch(interaction.user.id)
+      .catch(() => null);
+    const targetMember = await interaction.guild.members.fetch(targetUser.id).catch(() => null);
+    if (!executorMember) {
+      return interaction.reply({
+        content: "⚠️ Impossible de récupérer ton profil membre sur ce serveur.",
+        ephemeral: true,
+      });
+    }
+
+    if (!targetMember) {
+      return interaction.reply({
+        content: "⚠️ Ce membre est introuvable sur ce serveur.",
+        ephemeral: true,
+      });
+    }
+
+    if (targetMember.roles.cache.has(role.id)) {
+      return interaction.reply({
+        content: `ℹ️ ${targetUser} possède déjà le rôle ${role}.`,
+        ephemeral: true,
+      });
+    }
+
+    if (targetMember.roles.highest.position >= executorMember.roles.highest.position) {
+      return interaction.reply({
+        content: "⛔ Tu ne peux pas rankup ce membre (hiérarchie insuffisante).",
+        ephemeral: true,
+      });
+    }
+
+    await targetMember.roles.add(role, `Rankup par ${interaction.user.tag} | ${reason}`);
+
+    return interaction.reply({
+      content: `✅ ${targetUser} a été promu avec le rôle ${role}.\n📝 Raison: ${reason}`,
+      ephemeral: false,
     });
   }
 
