@@ -261,6 +261,7 @@ const client = new Client({
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildMembers,
     GatewayIntentBits.GuildMessages, // utile pour purge (fetch/bulkDelete)
+    GatewayIntentBits.MessageContent, // nécessaire pour les commandes en préfixe (ex: .banlist)
   ],
 });
 
@@ -351,5 +352,16 @@ client.on("interactionCreate", async (interaction) => {
     }
   }
 });
+
+
+client.on("messageCreate", async (message) => {
+  try {
+    // Commandes en préfixe (.)
+    if (await moderation.handleMessage?.(message, client)) return;
+  } catch (e) {
+    console.error("messageCreate fatal:", e);
+  }
+});
+
 
 client.login(TOKEN);
