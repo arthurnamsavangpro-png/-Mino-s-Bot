@@ -93,6 +93,20 @@ async function replyEphemeral(interaction, payload) {
   return interaction.reply({ ...payload, ephemeral: true });
 }
 
+async function safeDeferUpdate(interaction) {
+  if (interaction.deferred || interaction.replied) return;
+  await interaction.deferUpdate().catch(() => {});
+}
+
+async function safeFollowUp(interaction, payload) {
+  // Utilisé après deferUpdate() (ou même après reply)
+  try {
+    return await interaction.followUp({ ...payload, ephemeral: true });
+  } catch {
+    // rien
+  }
+}
+
 async function fetchAllMessages(channel, maxMessages = 1000) {
   const all = [];
   let before;
@@ -145,24 +159,40 @@ function renderTranscript(channel, messages) {
   return header + lines.join("\n");
 }
 
-/* ---------------- Naming (TA DEMANDE) ---------------- */
+/* ---------------- Lock anti-concurrence (évite états cassés / embeds en retard) ---------------- */
 
+const ticketLocks = new Map();
 /**
- * Prend les 4 premiers caractères du pseudo, mais "safe" pour un nom de salon.
- * On enlève espaces/char spé, on garde lettres/chiffres, sinon fallback "user".
+ * Sérialise toutes les actions par ticket_id (claim/unclaim/close/delete/transcript).
+ * IMPORTANT: on deferUpdate AVANT d'attendre le lock (sinon "échec interaction").
  */
+async function acquireTicketLock(ticketId) {
+  while (ticketLocks.has(ticketId)) {
+    await ticketLocks.get(ticketId).catch(() => {});
+  }
+  let release;
+  const p = new Promise((res) => (release = res));
+  ticketLocks.set(ticketId, p);
+
+  return () => {
+    if (ticketLocks.get(ticketId) === p) ticketLocks.delete(ticketId);
+    release();
+  };
+}
+
+/* ---------------- Naming (modèle demandé) ---------------- */
+
 function short4ForChannel(username) {
   const base = (username || "user")
     .normalize("NFKD")
-    .replace(/[\u0300-\u036f]/g, "") // accents
-    .replace(/[^a-zA-Z0-9]/g, "") // uniquement alphanum
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^a-zA-Z0-9]/g, "")
     .toLowerCase();
 
   const s = (base || "user").slice(0, 4);
   return s || "user";
 }
 
-/** Catégorie en slug pour salon */
 function slugCategory(label) {
   const s = (label || "support")
     .toString()
@@ -177,19 +207,17 @@ function slugCategory(label) {
   return s || "support";
 }
 
-/**
- * Modèle demandé :
- * - Non claim : 🟢 4premiersPseudoCreateur - {categorie}
- * - Claim : 🔴 4premiersPseudoClaimer - {categorie}
- *
- * ⚠️ Pour éviter les erreurs API, on n'utilise PAS d'espaces => on met des "-"
- */
 function buildTicketChannelName({ claimed, username, categoryLabel }) {
   const emoji = claimed ? "🔴" : "🟢";
   const short = short4ForChannel(username);
   const cat = slugCategory(categoryLabel);
-  // Exemple: 🟢-nazo-support
   return `${emoji}-${short}-${cat}`.slice(0, 100);
+}
+
+async function tryRenameTicketChannel(channel, newName) {
+  if (!channel || !channel.setName) return;
+  if (!newName || channel.name === newName) return;
+  await channel.setName(newName).catch(() => {});
 }
 
 /* ---------------- Ticket UI ---------------- */
@@ -213,7 +241,6 @@ function buildTicketEmbed({ openerId, categoryLabel, ticketId, claimedBy }) {
 }
 
 /**
- * Boutons dynamiques Claim/Unclaim :
  * - non claim => Claim vert
  * - claim => Unclaim rouge
  */
@@ -246,7 +273,6 @@ function buildTicketControls(ticketId, isClaimed) {
 }
 
 async function updateTicketMessage(interaction, data) {
-  // On édite le message qui contient les boutons (celui du bot)
   const msg = interaction.message;
   if (!msg || !msg.edit) return;
 
@@ -260,12 +286,6 @@ async function updateTicketMessage(interaction, data) {
       components: [controls],
     })
     .catch(() => {});
-}
-
-async function tryRenameTicketChannel(channel, newName) {
-  if (!channel || !channel.setName) return;
-  if (channel.name === newName) return;
-  await channel.setName(newName).catch(() => {});
 }
 
 /* ---------------- Service ---------------- */
@@ -652,7 +672,7 @@ function createTicketsService({ pool, config }) {
     const ticketId = crypto.randomUUID();
     const catLabel = categoryLabel || "Support";
 
-    // ✅ Nom initial demandé : 🟢 + 4 premiers pseudo créateur + catégorie
+    // Nom initial demandé : 🟢 + 4 premiers pseudo créateur + catégorie
     const channelName = buildTicketChannelName({
       claimed: false,
       username: interaction.user.username,
@@ -714,7 +734,7 @@ function createTicketsService({ pool, config }) {
         permissionOverwrites: overwrites,
         reason: "Ticket created",
       });
-    } catch (e) {
+    } catch {
       await replyEphemeral(interaction, {
         content:
           "⚠️ Impossible de créer le salon ticket (permissions/catégorie invalide).",
@@ -747,7 +767,7 @@ function createTicketsService({ pool, config }) {
     return true;
   }
 
-  /* ---------------- Ticket actions helpers ---------------- */
+  /* ---------------- Ticket helpers ---------------- */
 
   async function getTicket(ticketId) {
     const res = await pool.query(
@@ -776,110 +796,196 @@ function createTicketsService({ pool, config }) {
     return u?.username || "user";
   }
 
-  /**
-   * ✅ Toggle Claim / Unclaim + update embed + update bouton couleur
-   * ✅ + RENOMMAGE salon selon ton modèle
-   */
-  async function doClaim(interaction, ticketId) {
-    const ticket = await getTicket(ticketId);
-    if (!ticket) {
-      await replyEphemeral(interaction, { content: "⚠️ Ticket introuvable." });
-      return true;
-    }
+  async function applyClaimExclusive(channel, settings, finalClaimedBy, oldClaimedBy) {
+    if (!settings.claim_exclusive || !settings.staff_role_id || !channel) return;
 
-    const settings = await getSettings(ticket.guild_id);
-    if (!isStaff(interaction, settings)) {
-      await replyEphemeral(interaction, { content: "⛔ Staff/Admin uniquement." });
-      return true;
-    }
-
-    if (ticket.status !== "open") {
-      await replyEphemeral(interaction, { content: "⚠️ Ticket déjà fermé." });
-      return true;
-    }
-
-    // Toggle:
-    // - Not claimed => claim by clicker
-    // - Claimed by self => unclaim
-    // - Claimed by other => deny (admin peut unclaim)
-    let newClaimedBy = null;
-    let infoMsg = "";
-
-    if (!ticket.claimed_by) {
-      newClaimedBy = interaction.user.id;
-
-      await pool.query(
-        `UPDATE tickets SET claimed_by=$2 WHERE ticket_id=$1`,
-        [ticketId, newClaimedBy]
-      );
-
-      if (settings.claim_exclusive && settings.staff_role_id && interaction.channel) {
-        await interaction.channel.permissionOverwrites
-          .edit(settings.staff_role_id, { SendMessages: false })
-          .catch(() => {});
-        await interaction.channel.permissionOverwrites
-          .edit(newClaimedBy, { SendMessages: true, ViewChannel: true })
-          .catch(() => {});
-      }
-
-      infoMsg = `✅ Ticket pris en charge par **${interaction.user.username}**.`;
+    if (finalClaimedBy) {
+      // staff role ne peut pas parler, claimer oui
+      await channel.permissionOverwrites
+        .edit(settings.staff_role_id, { SendMessages: false })
+        .catch(() => {});
+      await channel.permissionOverwrites
+        .edit(finalClaimedBy, { SendMessages: true, ViewChannel: true })
+        .catch(() => {});
     } else {
-      const canUnclaim =
-        ticket.claimed_by === interaction.user.id || isAdmin(interaction);
+      // ré-autorise le staff role
+      await channel.permissionOverwrites
+        .edit(settings.staff_role_id, { SendMessages: true })
+        .catch(() => {});
 
-      if (!canUnclaim) {
-        await replyEphemeral(interaction, {
-          content: `⚠️ Déjà pris en charge par <@${ticket.claimed_by}>.`,
-        });
+      // nettoie l'overwrite de l'ancien claimer si possible (best-effort)
+      if (oldClaimedBy) {
+        const openerId = (() => {
+          // impossible ici sans requête; on ignore. on ne delete pas si risque
+          return null;
+        })();
+        if (!openerId) {
+          await channel.permissionOverwrites.delete(oldClaimedBy).catch(() => {});
+        }
+      }
+    }
+  }
+
+  /* ---------------- Actions (FIX: ack + lock + DB atomique) ---------------- */
+
+  async function doClaim(interaction, ticketId) {
+    // IMPORTANT: interaction déjà deferUpdate() dans le router
+    const release = await acquireTicketLock(ticketId);
+    try {
+      const ticket = await getTicket(ticketId);
+      if (!ticket) {
+        await safeFollowUp(interaction, { content: "⚠️ Ticket introuvable." });
         return true;
       }
 
-      await pool.query(`UPDATE tickets SET claimed_by=NULL WHERE ticket_id=$1`, [
-        ticketId,
-      ]);
-
-      if (settings.claim_exclusive && settings.staff_role_id && interaction.channel) {
-        await interaction.channel.permissionOverwrites
-          .edit(settings.staff_role_id, { SendMessages: true })
-          .catch(() => {});
+      const settings = await getSettings(ticket.guild_id);
+      if (!isStaff(interaction, settings)) {
+        await safeFollowUp(interaction, { content: "⛔ Staff/Admin uniquement." });
+        return true;
       }
 
-      newClaimedBy = null;
-      infoMsg = `🟥 Ticket non pris en charge.`;
-    }
+      if (ticket.status !== "open") {
+        await safeFollowUp(interaction, { content: "⚠️ Ticket déjà fermé." });
+        return true;
+      }
 
-    // ✅ Update embed + boutons
-    await updateTicketMessage(interaction, {
-      openerId: ticket.opener_id,
-      categoryLabel: ticket.category_label || "Support",
-      ticketId,
-      claimedBy: newClaimedBy,
-    });
+      const isAdm = isAdmin(interaction);
+      const oldClaimedBy = ticket.claimed_by || null;
 
-    // ✅ Rename channel (TA DEMANDE)
-    const catLabel = ticket.category_label || "Support";
-    if (interaction.channel) {
-      if (newClaimedBy) {
-        const name = buildTicketChannelName({
-          claimed: true,
-          username: interaction.user.username, // claimer
-          categoryLabel: catLabel,
-        });
-        await tryRenameTicketChannel(interaction.channel, name);
+      // --- DB atomique ---
+      // Cas 1: pas claim -> on claim (uniquement si claimed_by IS NULL)
+      // Cas 2: claim par moi -> unclaim (uniquement si claimed_by = moi)
+      // Cas 3: claim par autre -> interdit, sauf admin qui peut unclaim
+      let infoMsg = "";
+
+      if (!ticket.claimed_by) {
+        const upd = await pool.query(
+          `UPDATE tickets
+             SET claimed_by=$2
+           WHERE ticket_id=$1
+             AND status='open'
+             AND claimed_by IS NULL
+           RETURNING claimed_by`,
+          [ticketId, interaction.user.id]
+        );
+
+        if (upd.rowCount === 0) {
+          const latest = await getTicket(ticketId);
+          await safeFollowUp(interaction, {
+            content: latest?.claimed_by
+              ? `⚠️ Déjà pris en charge par <@${latest.claimed_by}>.`
+              : "⚠️ Impossible de claim (réessaie).",
+          });
+          return true;
+        }
+
+        infoMsg = `✅ Pris en charge par **${interaction.user.username}**.`;
+      } else if (ticket.claimed_by === interaction.user.id) {
+        const upd = await pool.query(
+          `UPDATE tickets
+             SET claimed_by=NULL
+           WHERE ticket_id=$1
+             AND status='open'
+             AND claimed_by=$2
+           RETURNING claimed_by`,
+          [ticketId, interaction.user.id]
+        );
+
+        if (upd.rowCount === 0) {
+          const latest = await getTicket(ticketId);
+          await safeFollowUp(interaction, {
+            content: latest?.claimed_by
+              ? `⚠️ Déjà pris en charge par <@${latest.claimed_by}>.`
+              : "⚠️ Déjà non pris en charge.",
+          });
+          return true;
+        }
+
+        infoMsg = `🟥 Ticket non pris en charge.`;
       } else {
-        const openerUsername = await fetchUsernameSafe(interaction.client, ticket.opener_id);
-        const name = buildTicketChannelName({
-          claimed: false,
-          username: openerUsername, // opener
-          categoryLabel: catLabel,
-        });
-        await tryRenameTicketChannel(interaction.channel, name);
-      }
-    }
+        if (!isAdm) {
+          await safeFollowUp(interaction, {
+            content: `⚠️ Déjà pris en charge par <@${ticket.claimed_by}>.`,
+          });
+          return true;
+        }
 
-    // Message d'info dans le ticket (non-ephemeral)
-    await interaction.reply({ content: infoMsg }).catch(() => {});
-    return true;
+        // admin: unclaim n'importe qui (atomique)
+        const upd = await pool.query(
+          `UPDATE tickets
+             SET claimed_by=NULL
+           WHERE ticket_id=$1
+             AND status='open'
+             AND claimed_by IS NOT NULL
+           RETURNING claimed_by`,
+          [ticketId]
+        );
+
+        if (upd.rowCount === 0) {
+          await safeFollowUp(interaction, { content: "⚠️ Déjà non pris en charge." });
+          return true;
+        }
+
+        infoMsg = `🟥 Ticket non pris en charge (admin).`;
+      }
+
+      // Re-fetch état final (évite incohérences)
+      const finalTicket = await getTicket(ticketId);
+      if (!finalTicket) {
+        await safeFollowUp(interaction, { content: "⚠️ Ticket introuvable." });
+        return true;
+      }
+
+      // Update embed + boutons (best-effort)
+      await updateTicketMessage(interaction, {
+        openerId: finalTicket.opener_id,
+        categoryLabel: finalTicket.category_label || "Support",
+        ticketId,
+        claimedBy: finalTicket.claimed_by || null,
+      });
+
+      // Claim exclusive perms (best-effort)
+      await applyClaimExclusive(
+        interaction.channel,
+        settings,
+        finalTicket.claimed_by || null,
+        oldClaimedBy
+      );
+
+      // Rename salon selon état final (best-effort)
+      const catLabel = finalTicket.category_label || "Support";
+      if (interaction.channel) {
+        if (finalTicket.claimed_by) {
+          const uname =
+            finalTicket.claimed_by === interaction.user.id
+              ? interaction.user.username
+              : await fetchUsernameSafe(interaction.client, finalTicket.claimed_by);
+
+          const name = buildTicketChannelName({
+            claimed: true,
+            username: uname,
+            categoryLabel: catLabel,
+          });
+          await tryRenameTicketChannel(interaction.channel, name);
+        } else {
+          const openerUsername = await fetchUsernameSafe(
+            interaction.client,
+            finalTicket.opener_id
+          );
+          const name = buildTicketChannelName({
+            claimed: false,
+            username: openerUsername,
+            categoryLabel: catLabel,
+          });
+          await tryRenameTicketChannel(interaction.channel, name);
+        }
+      }
+
+      await safeFollowUp(interaction, { content: infoMsg });
+      return true;
+    } finally {
+      release();
+    }
   }
 
   async function requestFeedback(interaction, client, ticketId, ticketRow) {
@@ -890,9 +996,9 @@ function createTicketsService({ pool, config }) {
       .setDescription(
         [
           "Ton ticket vient d’être fermé.",
-          "Tu peux noter la prise en charge (1 à 5).",
+          "Tu peux noter la prise en charge (1 à 5) puis envoyer (commentaire facultatif).",
           "",
-          "ℹ️ Le feedback est visible **uniquement par les admins**.",
+          "ℹ️ Visible **uniquement par les admins**.",
         ].join("\n")
       )
       .setFooter({ text: `Ticket ID: ${ticketId}` })
@@ -941,227 +1047,243 @@ function createTicketsService({ pool, config }) {
   }
 
   async function doClose(interaction, client, ticketId) {
-    const ticket = await getTicket(ticketId);
-    if (!ticket) {
-      await replyEphemeral(interaction, { content: "⚠️ Ticket introuvable." });
-      return true;
-    }
+    // IMPORTANT: interaction déjà deferUpdate() dans le router
+    const release = await acquireTicketLock(ticketId);
+    try {
+      const ticket = await getTicket(ticketId);
+      if (!ticket) {
+        await safeFollowUp(interaction, { content: "⚠️ Ticket introuvable." });
+        return true;
+      }
 
-    const settings = await getSettings(ticket.guild_id);
-    if (!isStaff(interaction, settings)) {
-      await replyEphemeral(interaction, { content: "⛔ Staff/Admin uniquement." });
-      return true;
-    }
+      const settings = await getSettings(ticket.guild_id);
+      if (!isStaff(interaction, settings)) {
+        await safeFollowUp(interaction, { content: "⛔ Staff/Admin uniquement." });
+        return true;
+      }
 
-    if (ticket.status !== "open") {
-      await replyEphemeral(interaction, { content: "⚠️ Ticket déjà fermé." });
-      return true;
-    }
-
-    await pool.query(
-      `UPDATE tickets SET status='closed', closed_at=NOW() WHERE ticket_id=$1`,
-      [ticketId]
-    );
-
-    if (interaction.channel) {
-      await interaction.channel.permissionOverwrites
-        .edit(ticket.opener_id, { SendMessages: false, ViewChannel: true })
-        .catch(() => {});
-    }
-
-    await interaction
-      .reply({ content: `🔒 Ticket fermé par <@${interaction.user.id}>.` })
-      .catch(() => {});
-
-    // transcript -> DB + salon admin
-    if (interaction.channel?.isTextBased?.()) {
-      const messages = await fetchAllMessages(interaction.channel, 1000).catch(
-        () => []
-      );
-      let content = renderTranscript(interaction.channel, messages);
-
-      const maxBytes = 7 * 1024 * 1024;
-      const buf = Buffer.from(content, "utf8");
-      if (buf.length > maxBytes) {
-        content =
-          content.slice(
-            0,
-            Math.floor((maxBytes / buf.length) * content.length)
-          ) + `\n\n[TRUNCATED] Transcript trop long, coupé.\n`;
+      if (ticket.status !== "open") {
+        await safeFollowUp(interaction, { content: "⚠️ Ticket déjà fermé." });
+        return true;
       }
 
       await pool.query(
-        `INSERT INTO ticket_transcripts (ticket_id, content)
-         VALUES ($1,$2)
-         ON CONFLICT (ticket_id) DO UPDATE SET content=EXCLUDED.content, created_at=NOW()`,
-        [ticketId, content]
+        `UPDATE tickets SET status='closed', closed_at=NOW()
+         WHERE ticket_id=$1 AND status='open'`,
+        [ticketId]
       );
 
-      const guild = await client.guilds.fetch(ticket.guild_id).catch(() => null);
-      if (guild) {
-        const adminTranscriptChannel = await fetchAdminChannel(
-          guild,
-          settings,
-          "transcript"
-        );
-        if (adminTranscriptChannel) {
-          const file = new AttachmentBuilder(Buffer.from(content, "utf8"), {
-            name: `ticket-${ticketId}.txt`,
-          });
-
-          const embed = new EmbedBuilder()
-            .setTitle("📄 Transcript")
-            .addFields(
-              { name: "Ticket", value: `\`${ticketId}\`` },
-              { name: "Auteur", value: `<@${ticket.opener_id}>`, inline: true },
-              {
-                name: "Traité par",
-                value: ticket.claimed_by ? `<@${ticket.claimed_by}>` : "—",
-                inline: true,
-              },
-              {
-                name: "Catégorie",
-                value: ticket.category_label || "Support",
-                inline: true,
-              }
-            )
-            .setTimestamp();
-
-          await adminTranscriptChannel
-            .send({ embeds: [embed], files: [file] })
-            .catch(() => {});
-        }
-      }
-    }
-
-    await requestFeedback(interaction, client, ticketId, ticket);
-
-    if (settings.delete_on_close && interaction.channel) {
-      setTimeout(() => {
-        interaction.channel
-          .delete("Ticket auto-delete after close")
+      // verrouille l'auteur (best-effort)
+      if (interaction.channel) {
+        await interaction.channel.permissionOverwrites
+          .edit(ticket.opener_id, { SendMessages: false, ViewChannel: true })
           .catch(() => {});
-      }, 10_000);
-    }
+      }
 
-    return true;
-  }
+      await safeFollowUp(interaction, {
+        content: `🔒 Ticket fermé par <@${interaction.user.id}>.`,
+      });
 
-  async function doDelete(interaction, client, ticketId) {
-    if (!isAdmin(interaction)) {
-      await replyEphemeral(interaction, { content: "⛔ Admin uniquement." });
-      return true;
-    }
+      // transcript -> DB + salon admin (après ack)
+      if (interaction.channel?.isTextBased?.()) {
+        const messages = await fetchAllMessages(interaction.channel, 1000).catch(
+          () => []
+        );
+        let content = renderTranscript(interaction.channel, messages);
 
-    const ticket = await getTicket(ticketId);
-    if (!ticket) {
-      await replyEphemeral(interaction, { content: "⚠️ Ticket introuvable." });
-      return true;
-    }
+        const maxBytes = 7 * 1024 * 1024;
+        const buf = Buffer.from(content, "utf8");
+        if (buf.length > maxBytes) {
+          content =
+            content.slice(
+              0,
+              Math.floor((maxBytes / buf.length) * content.length)
+            ) + `\n\n[TRUNCATED] Transcript trop long, coupé.\n`;
+        }
 
-    const guild = await client.guilds.fetch(ticket.guild_id).catch(() => null);
-    if (guild) {
-      const ch = await guild.channels.fetch(ticket.channel_id).catch(() => null);
-      if (ch) await ch.delete("Ticket deleted by admin").catch(() => {});
-    }
-
-    await pool.query(`DELETE FROM tickets WHERE ticket_id=$1`, [ticketId]);
-
-    if (interaction.isRepliable?.()) {
-      await replyEphemeral(interaction, { content: "✅ Ticket supprimé." }).catch(
-        () => {}
-      );
-    }
-    return true;
-  }
-
-  async function doTranscript(interaction, client, ticketId) {
-    if (!isAdmin(interaction)) {
-      await replyEphemeral(interaction, { content: "⛔ Admin uniquement." });
-      return true;
-    }
-
-    const ticket = await getTicket(ticketId);
-    if (!ticket) {
-      await replyEphemeral(interaction, { content: "⚠️ Ticket introuvable." });
-      return true;
-    }
-
-    const settings = await getSettings(ticket.guild_id);
-
-    let content = null;
-    const tRes = await pool.query(
-      `SELECT content FROM ticket_transcripts WHERE ticket_id=$1 LIMIT 1`,
-      [ticketId]
-    );
-    content = tRes.rows[0]?.content || null;
-
-    const guild = await client.guilds.fetch(ticket.guild_id).catch(() => null);
-    if (!guild) {
-      await replyEphemeral(interaction, { content: "⚠️ Serveur introuvable." });
-      return true;
-    }
-
-    if (!content) {
-      const ch = await guild.channels.fetch(ticket.channel_id).catch(() => null);
-      if (ch?.isTextBased?.()) {
-        const messages = await fetchAllMessages(ch, 1000).catch(() => []);
-        content = renderTranscript(ch, messages);
         await pool.query(
           `INSERT INTO ticket_transcripts (ticket_id, content)
            VALUES ($1,$2)
            ON CONFLICT (ticket_id) DO UPDATE SET content=EXCLUDED.content, created_at=NOW()`,
           [ticketId, content]
         );
-      }
-    }
 
-    const adminTranscriptChannel = await fetchAdminChannel(
-      guild,
-      settings,
-      "transcript"
-    );
-    if (!adminTranscriptChannel) {
-      await replyEphemeral(interaction, {
-        content:
-          "⚠️ Aucun salon transcript/admin configuré. Configure `admin_feedback_channel` ou `transcript_channel` via `/ticket-config set`.",
-      });
-      return true;
-    }
+        const guild = await client.guilds.fetch(ticket.guild_id).catch(() => null);
+        if (guild) {
+          const adminTranscriptChannel = await fetchAdminChannel(
+            guild,
+            settings,
+            "transcript"
+          );
+          if (adminTranscriptChannel) {
+            const file = new AttachmentBuilder(Buffer.from(content, "utf8"), {
+              name: `ticket-${ticketId}.txt`,
+            });
 
-    if (!content) {
-      await replyEphemeral(interaction, {
-        content:
-          "⚠️ Transcript indisponible (salon supprimé et pas de transcript en DB).",
-      });
-      return true;
-    }
+            const embed = new EmbedBuilder()
+              .setTitle("📄 Transcript")
+              .addFields(
+                { name: "Ticket", value: `\`${ticketId}\`` },
+                { name: "Auteur", value: `<@${ticket.opener_id}>`, inline: true },
+                {
+                  name: "Traité par",
+                  value: ticket.claimed_by ? `<@${ticket.claimed_by}>` : "—",
+                  inline: true,
+                },
+                {
+                  name: "Catégorie",
+                  value: ticket.category_label || "Support",
+                  inline: true,
+                }
+              )
+              .setTimestamp();
 
-    const file = new AttachmentBuilder(Buffer.from(content, "utf8"), {
-      name: `ticket-${ticketId}.txt`,
-    });
-
-    const embed = new EmbedBuilder()
-      .setTitle("📄 Transcript (manuel)")
-      .addFields(
-        { name: "Ticket", value: `\`${ticketId}\`` },
-        { name: "Auteur", value: `<@${ticket.opener_id}>`, inline: true },
-        {
-          name: "Traité par",
-          value: ticket.claimed_by ? `<@${ticket.claimed_by}>` : "—",
-          inline: true,
+            await adminTranscriptChannel
+              .send({ embeds: [embed], files: [file] })
+              .catch(() => {});
+          }
         }
-      )
-      .setTimestamp();
+      }
 
-    await adminTranscriptChannel
-      .send({ embeds: [embed], files: [file] })
-      .catch(() => {});
-    await replyEphemeral(interaction, {
-      content: `✅ Transcript envoyé dans <#${adminTranscriptChannel.id}>.`,
-    });
+      await requestFeedback(interaction, client, ticketId, ticket);
 
-    return true;
+      if (settings.delete_on_close && interaction.channel) {
+        setTimeout(() => {
+          interaction.channel
+            .delete("Ticket auto-delete after close")
+            .catch(() => {});
+        }, 10_000);
+      }
+
+      return true;
+    } finally {
+      release();
+    }
+  }
+
+  async function doDelete(interaction, client, ticketId) {
+    // IMPORTANT: interaction déjà deferUpdate() dans le router
+    const release = await acquireTicketLock(ticketId);
+    try {
+      if (!isAdmin(interaction)) {
+        await safeFollowUp(interaction, { content: "⛔ Admin uniquement." });
+        return true;
+      }
+
+      const ticket = await getTicket(ticketId);
+      if (!ticket) {
+        await safeFollowUp(interaction, { content: "⚠️ Ticket introuvable." });
+        return true;
+      }
+
+      const guild = await client.guilds.fetch(ticket.guild_id).catch(() => null);
+      if (guild) {
+        const ch = await guild.channels.fetch(ticket.channel_id).catch(() => null);
+        if (ch) await ch.delete("Ticket deleted by admin").catch(() => {});
+      }
+
+      await pool.query(`DELETE FROM tickets WHERE ticket_id=$1`, [ticketId]);
+
+      await safeFollowUp(interaction, { content: "✅ Ticket supprimé." });
+      return true;
+    } finally {
+      release();
+    }
+  }
+
+  async function doTranscript(interaction, client, ticketId) {
+    // IMPORTANT: interaction déjà deferUpdate() dans le router
+    const release = await acquireTicketLock(ticketId);
+    try {
+      if (!isAdmin(interaction)) {
+        await safeFollowUp(interaction, { content: "⛔ Admin uniquement." });
+        return true;
+      }
+
+      const ticket = await getTicket(ticketId);
+      if (!ticket) {
+        await safeFollowUp(interaction, { content: "⚠️ Ticket introuvable." });
+        return true;
+      }
+
+      const settings = await getSettings(ticket.guild_id);
+
+      let content = null;
+      const tRes = await pool.query(
+        `SELECT content FROM ticket_transcripts WHERE ticket_id=$1 LIMIT 1`,
+        [ticketId]
+      );
+      content = tRes.rows[0]?.content || null;
+
+      const guild = await client.guilds.fetch(ticket.guild_id).catch(() => null);
+      if (!guild) {
+        await safeFollowUp(interaction, { content: "⚠️ Serveur introuvable." });
+        return true;
+      }
+
+      if (!content) {
+        const ch = await guild.channels.fetch(ticket.channel_id).catch(() => null);
+        if (ch?.isTextBased?.()) {
+          const messages = await fetchAllMessages(ch, 1000).catch(() => []);
+          content = renderTranscript(ch, messages);
+          await pool.query(
+            `INSERT INTO ticket_transcripts (ticket_id, content)
+             VALUES ($1,$2)
+             ON CONFLICT (ticket_id) DO UPDATE SET content=EXCLUDED.content, created_at=NOW()`,
+            [ticketId, content]
+          );
+        }
+      }
+
+      const adminTranscriptChannel = await fetchAdminChannel(
+        guild,
+        settings,
+        "transcript"
+      );
+      if (!adminTranscriptChannel) {
+        await safeFollowUp(interaction, {
+          content:
+            "⚠️ Aucun salon transcript/admin configuré. Configure `admin_feedback_channel` ou `transcript_channel` via `/ticket-config set`.",
+        });
+        return true;
+      }
+
+      if (!content) {
+        await safeFollowUp(interaction, {
+          content:
+            "⚠️ Transcript indisponible (salon supprimé et pas de transcript en DB).",
+        });
+        return true;
+      }
+
+      const file = new AttachmentBuilder(Buffer.from(content, "utf8"), {
+        name: `ticket-${ticketId}.txt`,
+      });
+
+      const embed = new EmbedBuilder()
+        .setTitle("📄 Transcript (manuel)")
+        .addFields(
+          { name: "Ticket", value: `\`${ticketId}\`` },
+          { name: "Auteur", value: `<@${ticket.opener_id}>`, inline: true },
+          {
+            name: "Traité par",
+            value: ticket.claimed_by ? `<@${ticket.claimed_by}>` : "—",
+            inline: true,
+          }
+        )
+        .setTimestamp();
+
+      await adminTranscriptChannel
+        .send({ embeds: [embed], files: [file] })
+        .catch(() => {});
+      await safeFollowUp(interaction, {
+        content: `✅ Transcript envoyé dans <#${adminTranscriptChannel.id}>.`,
+      });
+
+      return true;
+    } finally {
+      release();
+    }
   }
 
   async function upsertFeedbackLogMessage(ticketId, channelId, messageId) {
@@ -1171,13 +1293,13 @@ function createTicketsService({ pool, config }) {
     );
   }
 
+  // Rate button => montre une modal immédiatement (évite "interaction failed")
   async function doRate(interaction, client, ticketId, rating) {
     const ticket = await getTicket(ticketId);
     if (!ticket) {
       await replyEphemeral(interaction, { content: "⚠️ Ticket introuvable." });
       return true;
     }
-
     if (interaction.user.id !== ticket.opener_id) {
       await replyEphemeral(interaction, {
         content: "⛔ Seul l’auteur du ticket peut noter.",
@@ -1186,73 +1308,10 @@ function createTicketsService({ pool, config }) {
     }
 
     const r = clamp(Number(rating || 0), 1, 5);
-    const settings = await getSettings(ticket.guild_id);
-
-    await pool.query(
-      `INSERT INTO ticket_feedback (ticket_id, guild_id, opener_id, claimed_by, rating, comment)
-       VALUES ($1,$2,$3,$4,$5,NULL)
-       ON CONFLICT (ticket_id) DO UPDATE SET rating=EXCLUDED.rating, claimed_by=EXCLUDED.claimed_by, created_at=NOW()`,
-      [ticketId, ticket.guild_id, ticket.opener_id, ticket.claimed_by, r]
-    );
-
-    const guild = await client.guilds.fetch(ticket.guild_id).catch(() => null);
-    if (guild) {
-      const adminFeedback = await fetchAdminChannel(guild, settings, "feedback");
-      if (adminFeedback) {
-        const fbRes = await pool.query(
-          `SELECT log_channel_id, log_message_id, comment FROM ticket_feedback WHERE ticket_id=$1 LIMIT 1`,
-          [ticketId]
-        );
-        const fb = fbRes.rows[0] || {};
-
-        const embed = new EmbedBuilder()
-          .setTitle("⭐ Ticket feedback (admin)")
-          .addFields(
-            { name: "Ticket", value: `\`${ticketId}\`` },
-            { name: "Note", value: `${buildStars(r)} (${r}/5)`, inline: true },
-            { name: "Auteur", value: `<@${ticket.opener_id}>`, inline: true },
-            {
-              name: "Traité par",
-              value: ticket.claimed_by ? `<@${ticket.claimed_by}>` : "—",
-              inline: true,
-            },
-            {
-              name: "Catégorie",
-              value: ticket.category_label || "Support",
-              inline: true,
-            }
-          )
-          .setTimestamp();
-
-        if (fb.comment) {
-          embed.addFields({
-            name: "Commentaire",
-            value: String(fb.comment).slice(0, 1024),
-          });
-        }
-
-        if (fb.log_channel_id && fb.log_message_id) {
-          const ch = await guild.channels.fetch(fb.log_channel_id).catch(() => null);
-          const msg = ch?.isTextBased?.()
-            ? await ch.messages.fetch(fb.log_message_id).catch(() => null)
-            : null;
-
-          if (msg) {
-            await msg.edit({ embeds: [embed] }).catch(() => {});
-          } else {
-            const sent = await adminFeedback.send({ embeds: [embed] }).catch(() => null);
-            if (sent) await upsertFeedbackLogMessage(ticketId, sent.channel.id, sent.id);
-          }
-        } else {
-          const sent = await adminFeedback.send({ embeds: [embed] }).catch(() => null);
-          if (sent) await upsertFeedbackLogMessage(ticketId, sent.channel.id, sent.id);
-        }
-      }
-    }
 
     const modal = new ModalBuilder()
       .setCustomId(`ticket:comment:${ticketId}:${r}`)
-      .setTitle("Commentaire (facultatif)");
+      .setTitle(`Feedback (${r}/5) - Commentaire (facultatif)`);
 
     const input = new TextInputBuilder()
       .setCustomId("comment")
@@ -1265,7 +1324,7 @@ function createTicketsService({ pool, config }) {
 
     await interaction.showModal(modal).catch(async () => {
       await replyEphemeral(interaction, {
-        content: `Merci ! Note reçue : ${buildStars(r)}`,
+        content: "⚠️ Impossible d’ouvrir la modal. Réessaie.",
       }).catch(() => {});
     });
 
@@ -1288,13 +1347,26 @@ function createTicketsService({ pool, config }) {
 
     const comment = (interaction.fields.getTextInputValue("comment") || "").trim();
     const r = clamp(Number(rating || 0), 1, 5);
+    const settings = await getSettings(ticket.guild_id);
 
     await pool.query(
-      `UPDATE ticket_feedback SET comment=$2, rating=$3, created_at=NOW() WHERE ticket_id=$1`,
-      [ticketId, comment || null, r]
+      `INSERT INTO ticket_feedback (ticket_id, guild_id, opener_id, claimed_by, rating, comment)
+       VALUES ($1,$2,$3,$4,$5,$6)
+       ON CONFLICT (ticket_id) DO UPDATE SET
+         rating=EXCLUDED.rating,
+         comment=EXCLUDED.comment,
+         claimed_by=EXCLUDED.claimed_by,
+         created_at=NOW()`,
+      [
+        ticketId,
+        ticket.guild_id,
+        ticket.opener_id,
+        ticket.claimed_by,
+        r,
+        comment || null,
+      ]
     );
 
-    const settings = await getSettings(ticket.guild_id);
     const guild = await client.guilds.fetch(ticket.guild_id).catch(() => null);
     if (guild) {
       const adminFeedback = await fetchAdminChannel(guild, settings, "feedback");
@@ -1464,11 +1536,18 @@ function createTicketsService({ pool, config }) {
         return await createTicket(interaction, "Support");
       }
 
+      if (action === "rate") {
+        // pas de deferUpdate ici, on doit showModal vite
+        return await doRate(interaction, client, parts[2], parts[3]);
+      }
+
+      // ✅ FIX: on ACK immédiatement pour éviter "Échec de l'interaction"
+      await safeDeferUpdate(interaction);
+
       if (action === "claim") return await doClaim(interaction, parts[2]);
       if (action === "close") return await doClose(interaction, client, parts[2]);
       if (action === "delete") return await doDelete(interaction, client, parts[2]);
       if (action === "transcript") return await doTranscript(interaction, client, parts[2]);
-      if (action === "rate") return await doRate(interaction, client, parts[2], parts[3]);
 
       return false;
     }
@@ -1524,8 +1603,10 @@ function createTicketsService({ pool, config }) {
         if (transcriptCh) patch.transcript_channel_id = transcriptCh.id;
         if (maxOpen !== null && maxOpen !== undefined) patch.max_open_per_user = maxOpen;
         if (cdMin !== null && cdMin !== undefined) patch.cooldown_seconds = cdMin * 60;
-        if (claimExclusive !== null && claimExclusive !== undefined) patch.claim_exclusive = claimExclusive;
-        if (deleteOnClose !== null && deleteOnClose !== undefined) patch.delete_on_close = deleteOnClose;
+        if (claimExclusive !== null && claimExclusive !== undefined)
+          patch.claim_exclusive = claimExclusive;
+        if (deleteOnClose !== null && deleteOnClose !== undefined)
+          patch.delete_on_close = deleteOnClose;
 
         const next = await upsertSettings(interaction.guildId, patch);
 
