@@ -153,6 +153,44 @@ function renderTranscript(channel, messages) {
   return header + lines.join("\n");
 }
 
+/** ✅ Embed ticket avec prise en charge (ta demande) */
+function buildTicketEmbed({ openerId, categoryLabel, ticketId, claimedBy }) {
+  const priseEnCharge = claimedBy
+    ? `Ticket pris en charge par : <@${claimedBy}>`
+    : "Ticket non pris en charge.";
+
+  return new EmbedBuilder()
+    .setTitle("🎫 Ticket créé")
+    .setDescription(
+      [
+        `**Auteur :** <@${openerId}>`,
+        `**Catégorie :** ${categoryLabel || "Support"}`,
+        `**Prise en charge :** ${priseEnCharge}`,
+        ``,
+        `Explique ton besoin ici. Un staff va te répondre.`,
+      ].join("\n")
+    )
+    .setFooter({ text: `Ticket ID: ${ticketId}` })
+    .setTimestamp();
+}
+
+async function updateTicketMessageEmbed(interaction, data) {
+  // On édite le message qui contient les boutons (celui du bot)
+  const msg = interaction.message;
+  if (!msg || !msg.edit) return;
+
+  const embed = buildTicketEmbed(data);
+
+  // On garde exactement les mêmes boutons
+  await msg
+    .edit({
+      content: msg.content ?? undefined,
+      embeds: [embed],
+      components: msg.components,
+    })
+    .catch(() => {});
+}
+
 function createTicketsService({ pool, config }) {
   /* ---------------- Slash commands ---------------- */
 
@@ -183,15 +221,25 @@ function createTicketsService({ pool, config }) {
         )
     )
     .addStringOption((opt) =>
-      opt.setName("titre").setDescription("Titre de l'embed").setRequired(false).setMaxLength(256)
+      opt
+        .setName("titre")
+        .setDescription("Titre de l'embed")
+        .setRequired(false)
+        .setMaxLength(256)
     )
     .addStringOption((opt) =>
-      opt.setName("description").setDescription("Texte de l'embed").setRequired(false).setMaxLength(1500)
+      opt
+        .setName("description")
+        .setDescription("Texte de l'embed")
+        .setRequired(false)
+        .setMaxLength(1500)
     )
     .addStringOption((opt) =>
       opt
         .setName("categories")
-        .setDescription("Mode categories: ex: Support|Questions, Signalement|Report, Partenariat")
+        .setDescription(
+          "Mode categories: ex: Support|Questions, Signalement|Report, Partenariat"
+        )
         .setRequired(false)
         .setMaxLength(1000)
     );
@@ -199,7 +247,11 @@ function createTicketsService({ pool, config }) {
   const ticketConfigCmd = new SlashCommandBuilder()
     .setName("ticket-config")
     .setDescription("ADMIN: Configure le système de tickets")
-    .addSubcommand((sub) => sub.setName("show").setDescription("Affiche la configuration actuelle"))
+    .addSubcommand((sub) =>
+      sub
+        .setName("show")
+        .setDescription("Affiche la configuration actuelle")
+    )
     .addSubcommand((sub) =>
       sub
         .setName("set")
@@ -212,7 +264,10 @@ function createTicketsService({ pool, config }) {
             .addChannelTypes(ChannelType.GuildCategory)
         )
         .addRoleOption((opt) =>
-          opt.setName("staff_role").setDescription("Rôle staff (optionnel)").setRequired(false)
+          opt
+            .setName("staff_role")
+            .setDescription("Rôle staff (optionnel)")
+            .setRequired(false)
         )
         .addChannelOption((opt) =>
           opt
@@ -245,10 +300,16 @@ function createTicketsService({ pool, config }) {
             .setMaxValue(1440)
         )
         .addBooleanOption((opt) =>
-          opt.setName("claim_exclusive").setDescription("Claim exclusif").setRequired(false)
+          opt
+            .setName("claim_exclusive")
+            .setDescription("Claim exclusif")
+            .setRequired(false)
         )
         .addBooleanOption((opt) =>
-          opt.setName("delete_on_close").setDescription("Supprimer auto après close").setRequired(false)
+          opt
+            .setName("delete_on_close")
+            .setDescription("Supprimer auto après close")
+            .setRequired(false)
         )
     );
 
@@ -256,7 +317,12 @@ function createTicketsService({ pool, config }) {
     .setName("ticket-stats")
     .setDescription("ADMIN: Stats tickets/feedback")
     .addIntegerOption((opt) =>
-      opt.setName("days").setDescription("Période en jours (défaut 30)").setRequired(false).setMinValue(1).setMaxValue(365)
+      opt
+        .setName("days")
+        .setDescription("Période en jours (défaut 30)")
+        .setRequired(false)
+        .setMinValue(1)
+        .setMaxValue(365)
     );
 
   const commands = [ticketPanelCmd, ticketConfigCmd, ticketStatsCmd];
@@ -465,7 +531,7 @@ function createTicketsService({ pool, config }) {
   }
 
   async function createTicket(interaction, categoryLabel) {
-    const guild = interaction.guild; // IMPORTANT: ne plus casser avec spread
+    const guild = interaction.guild;
     if (!guild) {
       await replyEphemeral(interaction, { content: "⚠️ Serveur introuvable." });
       return true;
@@ -554,18 +620,12 @@ function createTicketsService({ pool, config }) {
       [ticketId, guild.id, channel.id, interaction.user.id, categoryLabel || null]
     );
 
-    const embed = new EmbedBuilder()
-      .setTitle("🎫 Ticket créé")
-      .setDescription(
-        [
-          `**Auteur :** <@${interaction.user.id}>`,
-          `**Catégorie :** ${categoryLabel || "Support"}`,
-          ``,
-          `Explique ton besoin ici. Un staff va te répondre.`,
-        ].join("\n")
-      )
-      .setFooter({ text: `Ticket ID: ${ticketId}` })
-      .setTimestamp();
+    const embed = buildTicketEmbed({
+      openerId: interaction.user.id,
+      categoryLabel: categoryLabel || "Support",
+      ticketId,
+      claimedBy: null, // ✅ non pris en charge au départ
+    });
 
     const controls = new ActionRowBuilder().addComponents(
       new ButtonBuilder().setCustomId(`ticket:claim:${ticketId}`).setLabel("Claim").setStyle(ButtonStyle.Secondary),
@@ -580,10 +640,7 @@ function createTicketsService({ pool, config }) {
       components: [controls],
     });
 
-    await replyEphemeral(interaction, {
-      content: `✅ Ticket créé : <#${channel.id}>`,
-    });
-
+    await replyEphemeral(interaction, { content: `✅ Ticket créé : <#${channel.id}>` });
     return true;
   }
 
@@ -630,10 +687,23 @@ function createTicketsService({ pool, config }) {
       interaction.user.id,
     ]);
 
+    // Optionnel: claim exclusif
     if (settings.claim_exclusive && settings.staff_role_id && interaction.channel) {
-      await interaction.channel.permissionOverwrites.edit(settings.staff_role_id, { SendMessages: false }).catch(() => {});
-      await interaction.channel.permissionOverwrites.edit(interaction.user.id, { SendMessages: true, ViewChannel: true }).catch(() => {});
+      await interaction.channel.permissionOverwrites
+        .edit(settings.staff_role_id, { SendMessages: false })
+        .catch(() => {});
+      await interaction.channel.permissionOverwrites
+        .edit(interaction.user.id, { SendMessages: true, ViewChannel: true })
+        .catch(() => {});
     }
+
+    // ✅ Update embed (ta demande)
+    await updateTicketMessageEmbed(interaction, {
+      openerId: ticket.opener_id,
+      categoryLabel: ticket.category_label || "Support",
+      ticketId,
+      claimedBy: interaction.user.id,
+    });
 
     await interaction.reply({ content: `✅ Ticket claim par <@${interaction.user.id}>.` }).catch(() => {});
     return true;
@@ -691,7 +761,9 @@ function createTicketsService({ pool, config }) {
     await pool.query(`UPDATE tickets SET status='closed', closed_at=NOW() WHERE ticket_id=$1`, [ticketId]);
 
     if (interaction.channel) {
-      await interaction.channel.permissionOverwrites.edit(ticket.opener_id, { SendMessages: false, ViewChannel: true }).catch(() => {});
+      await interaction.channel.permissionOverwrites
+        .edit(ticket.opener_id, { SendMessages: false, ViewChannel: true })
+        .catch(() => {});
     }
 
     await interaction.reply({ content: `🔒 Ticket fermé par <@${interaction.user.id}>.` }).catch(() => {});
@@ -1069,7 +1141,6 @@ function createTicketsService({ pool, config }) {
       const panelId = interaction.customId.split(":")[2];
       const value = interaction.values?.[0];
 
-      // Get label if exists
       const p = await pool.query(
         `SELECT categories FROM ticket_panels WHERE panel_id=$1 LIMIT 1`,
         [panelId]
