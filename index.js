@@ -26,7 +26,9 @@ if (!TOKEN || !CLIENT_ID || !GUILD_ID) {
 }
 
 if (!process.env.DATABASE_URL) {
-  console.error("DATABASE_URL manquant. Ajoute une DB PostgreSQL sur Railway (ou définis DATABASE_URL).");
+  console.error(
+    "DATABASE_URL manquant. Ajoute une DB PostgreSQL sur Railway (ou définis DATABASE_URL)."
+  );
   process.exit(1);
 }
 
@@ -203,7 +205,9 @@ function buildVouchboardEmbed(rows, limit) {
     .setTitle("🏆 Classement des vouchs")
     .setDescription(desc)
     .setFooter({
-      text: `Top ${limit} • Mise à jour toutes les ${Math.round(VOUCHBOARD_REFRESH_MS / 1000)}s`,
+      text: `Top ${limit} • Mise à jour toutes les ${Math.round(
+        VOUCHBOARD_REFRESH_MS / 1000
+      )}s`,
     })
     .setTimestamp();
 }
@@ -335,16 +339,25 @@ client.on("interactionCreate", async (interaction) => {
     const rating = interaction.options.getInteger("rating") ?? 5;
 
     if (!interaction.guildId) {
-      return interaction.reply({ content: "⚠️ Cette commande marche dans un serveur.", ephemeral: true });
+      return interaction.reply({
+        content: "⚠️ Cette commande marche dans un serveur.",
+        ephemeral: true,
+      });
     }
     if (target.bot) {
       return interaction.reply({ content: "⚠️ Tu ne peux pas vouch un bot.", ephemeral: true });
     }
     if (target.id === interaction.user.id) {
-      return interaction.reply({ content: "⚠️ Tu ne peux pas te vouch toi-même.", ephemeral: true });
+      return interaction.reply({
+        content: "⚠️ Tu ne peux pas te vouch toi-même.",
+        ephemeral: true,
+      });
     }
     if (note.length < 3) {
-      return interaction.reply({ content: "⚠️ Ta note est trop courte (min 3 caractères).", ephemeral: true });
+      return interaction.reply({
+        content: "⚠️ Ta note est trop courte (min 3 caractères).",
+        ephemeral: true,
+      });
     }
 
     // Anti-spam : 1 vouch par personne -> même cible toutes les 24h
@@ -394,11 +407,23 @@ client.on("interactionCreate", async (interaction) => {
     // ✅ Optionnel mais utile : update du vouchboard tout de suite (sans attendre 60s)
     updateVouchboardMessage(client, interaction.guildId).catch(() => {});
 
-    return interaction.reply({ embeds: [embed], ephemeral: true });
+    // 🔁 Si tu veux que /vouch soit PUBLIC, laisse comme ça (pas d'ephemeral).
+    // Si tu veux qu'il soit privé, ajoute: ephemeral: true
+    return interaction.reply({ embeds: [embed] });
   }
 
-  // /vouches
+  // /vouches  ✅✅✅ PRIVÉ (EPHEMERAL) : visible uniquement par l'utilisateur qui exécute la commande
   if (interaction.commandName === "vouches") {
+    if (!interaction.guildId) {
+      return interaction.reply({
+        content: "⚠️ Cette commande marche dans un serveur.",
+        ephemeral: true,
+      });
+    }
+
+    // Important : on répond tout de suite en EPHEMERAL (évite timeout + reste 100% privé)
+    await interaction.deferReply({ ephemeral: true });
+
     const target = interaction.options.getUser("membre", true);
 
     const stats = await pool.query(
@@ -437,7 +462,8 @@ client.on("interactionCreate", async (interaction) => {
       )
       .setTimestamp();
 
-    return interaction.reply({ embeds: [embed] });
+    // On édite la réponse deferred (elle reste EPHEMERAL)
+    return interaction.editReply({ embeds: [embed] });
   }
 
   // /topvouches
