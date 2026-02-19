@@ -15,6 +15,8 @@ const {
   AttachmentBuilder,
 } = require("discord.js");
 
+/* ---------------- Utils ---------------- */
+
 function nowIso(ts) {
   const d = new Date(ts ?? Date.now());
   return d.toISOString().replace("T", " ").replace(/\.\d{3}Z$/, "Z");
@@ -33,16 +35,6 @@ function isAdmin(interaction) {
 function buildStars(n) {
   const v = clamp(Number(n) || 0, 1, 5);
   return "⭐".repeat(v);
-}
-
-function makeSafeChannelName(username, suffix) {
-  const base = (username || "user")
-    .toLowerCase()
-    .replace(/[^a-z0-9-]/g, "-")
-    .replace(/-+/g, "-")
-    .replace(/^-|-$/g, "")
-    .slice(0, 24);
-  return `ticket-${base || "user"}-${suffix}`.slice(0, 100);
 }
 
 function parseCategories(input) {
@@ -153,7 +145,55 @@ function renderTranscript(channel, messages) {
   return header + lines.join("\n");
 }
 
-/** ✅ Embed ticket (pris en charge = pseudo/mention, sans "Ticket pris en charge :") */
+/* ---------------- Naming (TA DEMANDE) ---------------- */
+
+/**
+ * Prend les 4 premiers caractères du pseudo, mais "safe" pour un nom de salon.
+ * On enlève espaces/char spé, on garde lettres/chiffres, sinon fallback "user".
+ */
+function short4ForChannel(username) {
+  const base = (username || "user")
+    .normalize("NFKD")
+    .replace(/[\u0300-\u036f]/g, "") // accents
+    .replace(/[^a-zA-Z0-9]/g, "") // uniquement alphanum
+    .toLowerCase();
+
+  const s = (base || "user").slice(0, 4);
+  return s || "user";
+}
+
+/** Catégorie en slug pour salon */
+function slugCategory(label) {
+  const s = (label || "support")
+    .toString()
+    .normalize("NFKD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .replace(/[^a-z0-9-]/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-|-$/g, "")
+    .slice(0, 50);
+
+  return s || "support";
+}
+
+/**
+ * Modèle demandé :
+ * - Non claim : 🟢 4premiersPseudoCreateur - {categorie}
+ * - Claim : 🔴 4premiersPseudoClaimer - {categorie}
+ *
+ * ⚠️ Pour éviter les erreurs API, on n'utilise PAS d'espaces => on met des "-"
+ */
+function buildTicketChannelName({ claimed, username, categoryLabel }) {
+  const emoji = claimed ? "🔴" : "🟢";
+  const short = short4ForChannel(username);
+  const cat = slugCategory(categoryLabel);
+  // Exemple: 🟢-nazo-support
+  return `${emoji}-${short}-${cat}`.slice(0, 100);
+}
+
+/* ---------------- Ticket UI ---------------- */
+
 function buildTicketEmbed({ openerId, categoryLabel, ticketId, claimedBy }) {
   const priseEnCharge = claimedBy ? `<@${claimedBy}>` : "Non pris en charge.";
 
@@ -172,7 +212,8 @@ function buildTicketEmbed({ openerId, categoryLabel, ticketId, claimedBy }) {
     .setTimestamp();
 }
 
-/** ✅ Boutons dynamiques Claim/Unclaim :
+/**
+ * Boutons dynamiques Claim/Unclaim :
  * - non claim => Claim vert
  * - claim => Unclaim rouge
  */
@@ -220,6 +261,14 @@ async function updateTicketMessage(interaction, data) {
     })
     .catch(() => {});
 }
+
+async function tryRenameTicketChannel(channel, newName) {
+  if (!channel || !channel.setName) return;
+  if (channel.name === newName) return;
+  await channel.setName(newName).catch(() => {});
+}
+
+/* ---------------- Service ---------------- */
 
 function createTicketsService({ pool, config }) {
   /* ---------------- Slash commands ---------------- */
@@ -601,8 +650,14 @@ function createTicketsService({ pool, config }) {
     }
 
     const ticketId = crypto.randomUUID();
-    const suffix = Math.random().toString(36).slice(2, 6);
-    const channelName = makeSafeChannelName(interaction.user.username, suffix);
+    const catLabel = categoryLabel || "Support";
+
+    // ✅ Nom initial demandé : 🟢 + 4 premiers pseudo créateur + catégorie
+    const channelName = buildTicketChannelName({
+      claimed: false,
+      username: interaction.user.username,
+      categoryLabel: catLabel,
+    });
 
     const overwrites = [
       {
@@ -670,12 +725,12 @@ function createTicketsService({ pool, config }) {
     await pool.query(
       `INSERT INTO tickets (ticket_id, guild_id, channel_id, opener_id, category_label, status)
        VALUES ($1,$2,$3,$4,$5,'open')`,
-      [ticketId, guild.id, channel.id, interaction.user.id, categoryLabel || null]
+      [ticketId, guild.id, channel.id, interaction.user.id, catLabel]
     );
 
     const embed = buildTicketEmbed({
       openerId: interaction.user.id,
-      categoryLabel: categoryLabel || "Support",
+      categoryLabel: catLabel,
       ticketId,
       claimedBy: null,
     });
@@ -716,7 +771,15 @@ function createTicketsService({ pool, config }) {
     return ch;
   }
 
-  /** ✅ Toggle Claim / Unclaim + update embed + update bouton couleur */
+  async function fetchUsernameSafe(client, userId) {
+    const u = await client.users.fetch(userId).catch(() => null);
+    return u?.username || "user";
+  }
+
+  /**
+   * ✅ Toggle Claim / Unclaim + update embed + update bouton couleur
+   * ✅ + RENOMMAGE salon selon ton modèle
+   */
   async function doClaim(interaction, ticketId) {
     const ticket = await getTicket(ticketId);
     if (!ticket) {
@@ -735,12 +798,12 @@ function createTicketsService({ pool, config }) {
       return true;
     }
 
-    // --- Toggle logic ---
+    // Toggle:
     // - Not claimed => claim by clicker
     // - Claimed by self => unclaim
     // - Claimed by other => deny (admin peut unclaim)
     let newClaimedBy = null;
-    let msg = "";
+    let infoMsg = "";
 
     if (!ticket.claimed_by) {
       newClaimedBy = interaction.user.id;
@@ -750,7 +813,6 @@ function createTicketsService({ pool, config }) {
         [ticketId, newClaimedBy]
       );
 
-      // claim exclusif => couper l'envoi aux autres staff
       if (settings.claim_exclusive && settings.staff_role_id && interaction.channel) {
         await interaction.channel.permissionOverwrites
           .edit(settings.staff_role_id, { SendMessages: false })
@@ -760,7 +822,7 @@ function createTicketsService({ pool, config }) {
           .catch(() => {});
       }
 
-      msg = `✅ Ticket pris en charge par **${interaction.user.username}**.`;
+      infoMsg = `✅ Ticket pris en charge par **${interaction.user.username}**.`;
     } else {
       const canUnclaim =
         ticket.claimed_by === interaction.user.id || isAdmin(interaction);
@@ -776,7 +838,6 @@ function createTicketsService({ pool, config }) {
         ticketId,
       ]);
 
-      // Si claim exclusif activé, on rend l'envoi au staff_role
       if (settings.claim_exclusive && settings.staff_role_id && interaction.channel) {
         await interaction.channel.permissionOverwrites
           .edit(settings.staff_role_id, { SendMessages: true })
@@ -784,10 +845,10 @@ function createTicketsService({ pool, config }) {
       }
 
       newClaimedBy = null;
-      msg = `🟥 Ticket non pris en charge.`;
+      infoMsg = `🟥 Ticket non pris en charge.`;
     }
 
-    // Update embed + boutons (couleurs)
+    // ✅ Update embed + boutons
     await updateTicketMessage(interaction, {
       openerId: ticket.opener_id,
       categoryLabel: ticket.category_label || "Support",
@@ -795,8 +856,29 @@ function createTicketsService({ pool, config }) {
       claimedBy: newClaimedBy,
     });
 
+    // ✅ Rename channel (TA DEMANDE)
+    const catLabel = ticket.category_label || "Support";
+    if (interaction.channel) {
+      if (newClaimedBy) {
+        const name = buildTicketChannelName({
+          claimed: true,
+          username: interaction.user.username, // claimer
+          categoryLabel: catLabel,
+        });
+        await tryRenameTicketChannel(interaction.channel, name);
+      } else {
+        const openerUsername = await fetchUsernameSafe(interaction.client, ticket.opener_id);
+        const name = buildTicketChannelName({
+          claimed: false,
+          username: openerUsername, // opener
+          categoryLabel: catLabel,
+        });
+        await tryRenameTicketChannel(interaction.channel, name);
+      }
+    }
+
     // Message d'info dans le ticket (non-ephemeral)
-    await interaction.reply({ content: msg }).catch(() => {});
+    await interaction.reply({ content: infoMsg }).catch(() => {});
     return true;
   }
 
@@ -860,14 +942,21 @@ function createTicketsService({ pool, config }) {
 
   async function doClose(interaction, client, ticketId) {
     const ticket = await getTicket(ticketId);
-    if (!ticket) return replyEphemeral(interaction, { content: "⚠️ Ticket introuvable." });
+    if (!ticket) {
+      await replyEphemeral(interaction, { content: "⚠️ Ticket introuvable." });
+      return true;
+    }
 
     const settings = await getSettings(ticket.guild_id);
-    if (!isStaff(interaction, settings))
-      return replyEphemeral(interaction, { content: "⛔ Staff/Admin uniquement." });
+    if (!isStaff(interaction, settings)) {
+      await replyEphemeral(interaction, { content: "⛔ Staff/Admin uniquement." });
+      return true;
+    }
 
-    if (ticket.status !== "open")
-      return replyEphemeral(interaction, { content: "⚠️ Ticket déjà fermé." });
+    if (ticket.status !== "open") {
+      await replyEphemeral(interaction, { content: "⚠️ Ticket déjà fermé." });
+      return true;
+    }
 
     await pool.query(
       `UPDATE tickets SET status='closed', closed_at=NOW() WHERE ticket_id=$1`,
@@ -959,11 +1048,16 @@ function createTicketsService({ pool, config }) {
   }
 
   async function doDelete(interaction, client, ticketId) {
-    if (!isAdmin(interaction))
-      return replyEphemeral(interaction, { content: "⛔ Admin uniquement." });
+    if (!isAdmin(interaction)) {
+      await replyEphemeral(interaction, { content: "⛔ Admin uniquement." });
+      return true;
+    }
 
     const ticket = await getTicket(ticketId);
-    if (!ticket) return replyEphemeral(interaction, { content: "⚠️ Ticket introuvable." });
+    if (!ticket) {
+      await replyEphemeral(interaction, { content: "⚠️ Ticket introuvable." });
+      return true;
+    }
 
     const guild = await client.guilds.fetch(ticket.guild_id).catch(() => null);
     if (guild) {
@@ -982,11 +1076,16 @@ function createTicketsService({ pool, config }) {
   }
 
   async function doTranscript(interaction, client, ticketId) {
-    if (!isAdmin(interaction))
-      return replyEphemeral(interaction, { content: "⛔ Admin uniquement." });
+    if (!isAdmin(interaction)) {
+      await replyEphemeral(interaction, { content: "⛔ Admin uniquement." });
+      return true;
+    }
 
     const ticket = await getTicket(ticketId);
-    if (!ticket) return replyEphemeral(interaction, { content: "⚠️ Ticket introuvable." });
+    if (!ticket) {
+      await replyEphemeral(interaction, { content: "⚠️ Ticket introuvable." });
+      return true;
+    }
 
     const settings = await getSettings(ticket.guild_id);
 
@@ -998,7 +1097,10 @@ function createTicketsService({ pool, config }) {
     content = tRes.rows[0]?.content || null;
 
     const guild = await client.guilds.fetch(ticket.guild_id).catch(() => null);
-    if (!guild) return replyEphemeral(interaction, { content: "⚠️ Serveur introuvable." });
+    if (!guild) {
+      await replyEphemeral(interaction, { content: "⚠️ Serveur introuvable." });
+      return true;
+    }
 
     if (!content) {
       const ch = await guild.channels.fetch(ticket.channel_id).catch(() => null);
@@ -1020,17 +1122,19 @@ function createTicketsService({ pool, config }) {
       "transcript"
     );
     if (!adminTranscriptChannel) {
-      return replyEphemeral(interaction, {
+      await replyEphemeral(interaction, {
         content:
           "⚠️ Aucun salon transcript/admin configuré. Configure `admin_feedback_channel` ou `transcript_channel` via `/ticket-config set`.",
       });
+      return true;
     }
 
     if (!content) {
-      return replyEphemeral(interaction, {
+      await replyEphemeral(interaction, {
         content:
           "⚠️ Transcript indisponible (salon supprimé et pas de transcript en DB).",
       });
+      return true;
     }
 
     const file = new AttachmentBuilder(Buffer.from(content, "utf8"), {
@@ -1069,12 +1173,17 @@ function createTicketsService({ pool, config }) {
 
   async function doRate(interaction, client, ticketId, rating) {
     const ticket = await getTicket(ticketId);
-    if (!ticket) return replyEphemeral(interaction, { content: "⚠️ Ticket introuvable." });
+    if (!ticket) {
+      await replyEphemeral(interaction, { content: "⚠️ Ticket introuvable." });
+      return true;
+    }
 
-    if (interaction.user.id !== ticket.opener_id)
-      return replyEphemeral(interaction, {
+    if (interaction.user.id !== ticket.opener_id) {
+      await replyEphemeral(interaction, {
         content: "⛔ Seul l’auteur du ticket peut noter.",
       });
+      return true;
+    }
 
     const r = clamp(Number(rating || 0), 1, 5);
     const settings = await getSettings(ticket.guild_id);
@@ -1165,12 +1274,17 @@ function createTicketsService({ pool, config }) {
 
   async function doComment(interaction, client, ticketId, rating) {
     const ticket = await getTicket(ticketId);
-    if (!ticket) return replyEphemeral(interaction, { content: "⚠️ Ticket introuvable." });
+    if (!ticket) {
+      await replyEphemeral(interaction, { content: "⚠️ Ticket introuvable." });
+      return true;
+    }
 
-    if (interaction.user.id !== ticket.opener_id)
-      return replyEphemeral(interaction, {
+    if (interaction.user.id !== ticket.opener_id) {
+      await replyEphemeral(interaction, {
         content: "⛔ Seul l’auteur du ticket peut commenter.",
       });
+      return true;
+    }
 
     const comment = (interaction.fields.getTextInputValue("comment") || "").trim();
     const r = clamp(Number(rating || 0), 1, 5);
@@ -1354,10 +1468,7 @@ function createTicketsService({ pool, config }) {
       if (action === "close") return await doClose(interaction, client, parts[2]);
       if (action === "delete") return await doDelete(interaction, client, parts[2]);
       if (action === "transcript") return await doTranscript(interaction, client, parts[2]);
-
-      if (action === "rate") {
-        return await doRate(interaction, client, parts[2], parts[3]);
-      }
+      if (action === "rate") return await doRate(interaction, client, parts[2], parts[3]);
 
       return false;
     }
