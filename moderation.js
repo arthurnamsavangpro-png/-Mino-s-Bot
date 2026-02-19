@@ -169,6 +169,13 @@ function createModerationService({ pool, config }) {
       )
       .addStringOption((opt) =>
         opt
+          .setName('raison')
+          .setDescription('Raison')
+          .setRequired(true)
+          .setMaxLength(300)
+      )
+      .addStringOption((opt) =>
+        opt
           .setName('duree')
           .setDescription('Durée: 10m, 2h, 3d, 1w (ou 0/off pour retirer)')
           .setRequired(false)
@@ -178,13 +185,6 @@ function createModerationService({ pool, config }) {
           .setName('retirer')
           .setDescription('Retirer le timeout (ignore la durée)')
           .setRequired(false)
-      )
-      .addStringOption((opt) =>
-        opt
-          .setName('raison')
-          .setDescription('Raison')
-          .setRequired(true)
-          .setMaxLength(300)
       )
       .addBooleanOption((opt) =>
         opt
