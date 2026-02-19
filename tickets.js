@@ -46,6 +46,12 @@ function buildStars(n) {
   return "⭐".repeat(v);
 }
 
+function normalizeFreeReason(input) {
+  const s = (input || "").toString().trim();
+  if (!s) return null;
+  return s.slice(0, 100);
+}
+
 function parseCategories(input) {
   if (!input || !input.trim()) return null;
 
@@ -107,7 +113,6 @@ async function replyEphemeral(interaction, payload) {
   delete pEdit.flags;
 
   if (interaction.deferred || interaction.replied) {
-    // editReply si possible, sinon followUp
     try {
       return await interaction.editReply(pEdit);
     } catch {
@@ -184,9 +189,8 @@ function renderTranscript(channel, messages) {
   return header + lines.join("\n");
 }
 
-/* ---------------- Lock anti-concurrence (anti ticket bloqué) ---------------- */
+/* ---------------- Lock anti-concurrence ---------------- */
 
-// Lock par ticket_id + auto-release en cas de souci (évite deadlock)
 const ticketLocks = new Map();
 
 async function acquireTicketLock(ticketId, timeoutMs = 15000) {
@@ -222,7 +226,7 @@ async function acquireTicketLock(ticketId, timeoutMs = 15000) {
   };
 }
 
-/* ---------------- Naming (modèle demandé) ---------------- */
+/* ---------------- Naming ---------------- */
 
 function short4ForChannel(username) {
   const base = (username || "user")
@@ -272,7 +276,7 @@ function buildTicketEmbed({ openerId, categoryLabel, ticketId, claimedBy }) {
     .setDescription(
       [
         `**Auteur :** <@${openerId}>`,
-        `**Raison :** ${categoryLabel || "Support"}`, // ✅ demandé: "Raison"
+        `**Raison :** ${categoryLabel || "Support"}`,
         `**Pris en charge :** ${priseEnCharge}`,
         ``,
         `Explique ton besoin ici. Un staff va te répondre.`,
@@ -282,10 +286,6 @@ function buildTicketEmbed({ openerId, categoryLabel, ticketId, claimedBy }) {
     .setTimestamp();
 }
 
-/**
- * - non claim => Claim vert
- * - claim => Unclaim rouge
- */
 function buildTicketControls(ticketId, isClaimed) {
   const claimBtn = isClaimed
     ? new ButtonBuilder()
@@ -320,7 +320,6 @@ async function updateTicketMessage(interaction, data) {
 
   if (!channel?.isTextBased?.() || !messageId) return;
 
-  // ✅ plus robuste que interaction.message direct
   const msg =
     (await channel.messages.fetch(messageId).catch(() => null)) || interaction.message;
   if (!msg?.edit) return;
@@ -378,11 +377,13 @@ function createTicketsService({ pool, config }) {
         .setRequired(false)
         .setMaxLength(1500)
     )
+    // ✅ IMPORTANT: option unique qui sert de "raison libre" en mode simple
+    // et de "liste de catégories" en mode categories
     .addStringOption((opt) =>
       opt
         .setName("categories")
         .setDescription(
-          "Optionnel: remplace les catégories. Format: Support|Aide, Recrutement|Candidature"
+          "Mode simple: Raison libre (ex: Test). Mode categories: liste (ex: Support|Aide, Recrutement|Candidature)"
         )
         .setRequired(false)
         .setMaxLength(1000)
@@ -440,7 +441,10 @@ function createTicketsService({ pool, config }) {
           opt.setName("claim_exclusive").setDescription("Claim exclusif").setRequired(false)
         )
         .addBooleanOption((opt) =>
-          opt.setName("delete_on_close").setDescription("Supprimer auto après close").setRequired(false)
+          opt
+            .setName("delete_on_close")
+            .setDescription("Supprimer auto après close")
+            .setRequired(false)
         )
     );
 
@@ -554,21 +558,17 @@ function createTicketsService({ pool, config }) {
     }
 
     const panelId = crypto.randomUUID();
-    let categories = null;
 
-    if (mode === "categories") {
-      // ✅ si rien n'est fourni: on met les catégories prédéfinies
-      categories = parseCategories(interaction.options.getString("categories")) || PRESET_CATEGORIES;
-    }
-
-    const embed = new EmbedBuilder()
-      .setTitle(title)
-      .setDescription(desc)
-      .setFooter({ text: `Panel ID: ${panelId}` })
-      .setTimestamp();
+    // ✅ FIX: mode simple -> "categories" = raison libre
+    // mode categories -> "categories" = liste de catégories
+    const rawCategoriesOrReason = interaction.options.getString("categories") || "";
+    let modePayload = null;
 
     let components = [];
     if (mode === "simple") {
+      const freeReason = normalizeFreeReason(rawCategoriesOrReason) || "Support";
+      modePayload = { simple_reason: freeReason };
+
       components = [
         new ActionRowBuilder().addComponents(
           new ButtonBuilder()
@@ -578,6 +578,11 @@ function createTicketsService({ pool, config }) {
         ),
       ];
     } else {
+      const categories =
+        parseCategories(rawCategoriesOrReason) || PRESET_CATEGORIES;
+
+      modePayload = { categories };
+
       components = [
         new ActionRowBuilder().addComponents(
           new StringSelectMenuBuilder()
@@ -594,6 +599,12 @@ function createTicketsService({ pool, config }) {
       ];
     }
 
+    const embed = new EmbedBuilder()
+      .setTitle(title)
+      .setDescription(desc)
+      .setFooter({ text: `Panel ID: ${panelId}` })
+      .setTimestamp();
+
     const msg = await targetChannel.send({ embeds: [embed], components });
 
     await pool.query(
@@ -606,7 +617,7 @@ function createTicketsService({ pool, config }) {
         msg.channel.id,
         msg.id,
         mode,
-        categories ? JSON.stringify(categories) : null,
+        modePayload ? JSON.stringify(modePayload) : null,
         interaction.user.id,
       ]
     );
@@ -675,11 +686,8 @@ function createTicketsService({ pool, config }) {
     }
 
     const ticketId = crypto.randomUUID();
+    const reason = (reasonLabel || "Support").toString().trim().slice(0, 100);
 
-    // ✅ Raison = label choisi dans le select
-    const reason = reasonLabel || "Support";
-
-    // Nom initial : 🟢 + 4 premiers pseudo créateur + raison
     const channelName = buildTicketChannelName({
       claimed: false,
       username: interaction.user.username,
@@ -748,7 +756,6 @@ function createTicketsService({ pool, config }) {
       return true;
     }
 
-    // DB: on garde category_label comme "raison"
     await pool.query(
       `INSERT INTO tickets (ticket_id, guild_id, channel_id, opener_id, category_label, status)
        VALUES ($1,$2,$3,$4,$5,'open')`,
@@ -774,7 +781,7 @@ function createTicketsService({ pool, config }) {
     return true;
   }
 
-  /* ---------------- Ticket helpers ---------------- */
+  /* ---------------- DB helpers ---------------- */
 
   async function getTicket(ticketId) {
     const res = await pool.query(
@@ -783,6 +790,23 @@ function createTicketsService({ pool, config }) {
       [ticketId]
     );
     return res.rows[0] || null;
+  }
+
+  async function getPanel(panelId) {
+    const res = await pool.query(
+      `SELECT panel_id, mode, categories FROM ticket_panels WHERE panel_id=$1 LIMIT 1`,
+      [panelId]
+    );
+    return res.rows[0] || null;
+  }
+
+  function parsePanelPayload(categoriesField) {
+    try {
+      const obj = typeof categoriesField === "string" ? JSON.parse(categoriesField) : categoriesField;
+      return obj && typeof obj === "object" ? obj : null;
+    } catch {
+      return null;
+    }
   }
 
   async function fetchAdminChannel(guild, settings, kind) {
@@ -820,7 +844,7 @@ function createTicketsService({ pool, config }) {
     }
   }
 
-  /* ---------------- Actions (ack + lock + DB atomique + message public) ---------------- */
+  /* ---------------- Actions ---------------- */
 
   async function doClaim(interaction, ticketId) {
     const release = await acquireTicketLock(ticketId);
@@ -845,7 +869,6 @@ function createTicketsService({ pool, config }) {
       const isAdm = isAdmin(interaction);
       let publicMsg = null;
 
-      // 1) non claim -> claim
       if (!ticket.claimed_by) {
         const upd = await pool.query(
           `UPDATE tickets
@@ -868,9 +891,7 @@ function createTicketsService({ pool, config }) {
         }
 
         publicMsg = `✅ Ticket pris en charge par <@${interaction.user.id}>.`;
-      }
-      // 2) claim par moi -> unclaim
-      else if (ticket.claimed_by === interaction.user.id) {
+      } else if (ticket.claimed_by === interaction.user.id) {
         const upd = await pool.query(
           `UPDATE tickets
              SET claimed_by=NULL
@@ -892,9 +913,7 @@ function createTicketsService({ pool, config }) {
         }
 
         publicMsg = `🟥 Ticket n'est plus pris en charge.`;
-      }
-      // 3) claim par autre -> refus (admin peut unclaim l'autre)
-      else {
+      } else {
         if (!isAdm) {
           await safeFollowUpEphemeral(interaction, {
             content: `⚠️ Déjà pris en charge par <@${ticket.claimed_by}>.`,
@@ -926,7 +945,6 @@ function createTicketsService({ pool, config }) {
         return true;
       }
 
-      // update embed + boutons
       await updateTicketMessage(interaction, {
         openerId: finalTicket.opener_id,
         categoryLabel: finalTicket.category_label || "Support",
@@ -934,10 +952,8 @@ function createTicketsService({ pool, config }) {
         claimedBy: finalTicket.claimed_by || null,
       });
 
-      // claim exclusive perms (best effort)
       await applyClaimExclusive(interaction.channel, settings, finalTicket.claimed_by || null);
 
-      // rename salon (best effort)
       const reason = finalTicket.category_label || "Support";
       if (interaction.channel) {
         if (finalTicket.claimed_by) {
@@ -954,16 +970,18 @@ function createTicketsService({ pool, config }) {
           const openerUsername = await fetchUsernameSafe(interaction.client, finalTicket.opener_id);
           await tryRenameTicketChannel(
             interaction.channel,
-            buildTicketChannelName({ claimed: false, username: openerUsername, categoryLabel: reason })
+            buildTicketChannelName({
+              claimed: false,
+              username: openerUsername,
+              categoryLabel: reason,
+            })
           );
         }
       }
 
-      // ✅ Message visible par tous dans le ticket
       if (publicMsg) await safeChannelSend(interaction.channel, publicMsg);
-
       return true;
-    } catch (e) {
+    } catch {
       await safeFollowUpEphemeral(interaction, { content: "⚠️ Erreur claim (voir logs)." });
       return true;
     } finally {
@@ -1041,7 +1059,6 @@ function createTicketsService({ pool, config }) {
 
       await safeChannelSend(interaction.channel, `🔒 Ticket fermé par <@${interaction.user.id}>.`);
 
-      // transcript -> DB + salon admin
       if (interaction.channel?.isTextBased?.()) {
         const messages = await fetchAllMessages(interaction.channel, 1000).catch(() => []);
         let content = renderTranscript(interaction.channel, messages);
@@ -1218,14 +1235,12 @@ function createTicketsService({ pool, config }) {
   }
 
   async function upsertFeedbackLogMessage(ticketId, channelId, messageId) {
-    await pool.query(`UPDATE ticket_feedback SET log_channel_id=$2, log_message_id=$3 WHERE ticket_id=$1`, [
-      ticketId,
-      channelId,
-      messageId,
-    ]);
+    await pool.query(
+      `UPDATE ticket_feedback SET log_channel_id=$2, log_message_id=$3 WHERE ticket_id=$1`,
+      [ticketId, channelId, messageId]
+    );
   }
 
-  // Rate button => show modal immédiatement
   async function doRate(interaction, ticketId, rating) {
     const ticket = await getTicket(ticketId);
     if (!ticket) {
@@ -1310,7 +1325,9 @@ function createTicketsService({ pool, config }) {
 
         if (fb.log_channel_id && fb.log_message_id) {
           const ch = await guild.channels.fetch(fb.log_channel_id).catch(() => null);
-          const msg = ch?.isTextBased?.() ? await ch.messages.fetch(fb.log_message_id).catch(() => null) : null;
+          const msg = ch?.isTextBased?.()
+            ? await ch.messages.fetch(fb.log_message_id).catch(() => null)
+            : null;
 
           if (msg) {
             await msg.edit({ embeds: [embed] }).catch(() => {});
@@ -1408,18 +1425,17 @@ function createTicketsService({ pool, config }) {
       const panelId = interaction.customId.split(":")[2];
       const value = interaction.values?.[0];
 
-      const p = await pool.query(`SELECT categories FROM ticket_panels WHERE panel_id=$1 LIMIT 1`, [panelId]);
-      const cats = p.rows[0]?.categories || null;
+      const panel = await getPanel(panelId);
+      const payload = parsePanelPayload(panel?.categories);
 
       let label = null;
-      try {
-        const arr = typeof cats === "string" ? JSON.parse(cats) : cats;
-        const found = Array.isArray(arr) ? arr.find((c) => c.value === value) : null;
+      const arr = payload?.categories;
+      if (Array.isArray(arr)) {
+        const found = arr.find((c) => c.value === value);
         label = found?.label || null;
-      } catch {}
+      }
 
       await interaction.deferReply({ flags: MessageFlags.Ephemeral }).catch(() => {});
-      // ✅ label = "Support / Vente de Brainrot / Recrutement / Questions"
       return await createTicket(interaction, label || value || "Support");
     }
 
@@ -1431,16 +1447,20 @@ function createTicketsService({ pool, config }) {
       const action = parts[1];
 
       if (action === "open") {
+        // ✅ FIX: mode simple -> récupérer la raison libre stockée dans le panel
+        const panelId = parts[2];
+        const panel = await getPanel(panelId);
+        const payload = parsePanelPayload(panel?.categories);
+        const reason = normalizeFreeReason(payload?.simple_reason) || "Support";
+
         await interaction.deferReply({ flags: MessageFlags.Ephemeral }).catch(() => {});
-        return await createTicket(interaction, "Support");
+        return await createTicket(interaction, reason);
       }
 
       if (action === "rate") {
-        // showModal = ack direct
         return await doRate(interaction, parts[2], parts[3]);
       }
 
-      // ✅ ACK immédiat pour éviter "Échec de l'interaction"
       await safeDeferUpdate(interaction);
 
       if (action === "claim") return await doClaim(interaction, parts[2]);
