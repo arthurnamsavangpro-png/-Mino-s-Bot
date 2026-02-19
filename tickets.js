@@ -153,11 +153,9 @@ function renderTranscript(channel, messages) {
   return header + lines.join("\n");
 }
 
-/** ✅ Embed ticket avec prise en charge (ta demande) */
+/** ✅ Embed ticket (pris en charge = pseudo/mention, sans "Ticket pris en charge :") */
 function buildTicketEmbed({ openerId, categoryLabel, ticketId, claimedBy }) {
-  const priseEnCharge = claimedBy
-    ? `Ticket pris en charge par : <@${claimedBy}>`
-    : "Ticket non pris en charge.";
+  const priseEnCharge = claimedBy ? `<@${claimedBy}>` : "Non pris en charge.";
 
   return new EmbedBuilder()
     .setTitle("🎫 Ticket créé")
@@ -165,7 +163,7 @@ function buildTicketEmbed({ openerId, categoryLabel, ticketId, claimedBy }) {
       [
         `**Auteur :** <@${openerId}>`,
         `**Catégorie :** ${categoryLabel || "Support"}`,
-        `**Prise en charge :** ${priseEnCharge}`,
+        `**Pris en charge :** ${priseEnCharge}`,
         ``,
         `Explique ton besoin ici. Un staff va te répondre.`,
       ].join("\n")
@@ -174,19 +172,51 @@ function buildTicketEmbed({ openerId, categoryLabel, ticketId, claimedBy }) {
     .setTimestamp();
 }
 
-async function updateTicketMessageEmbed(interaction, data) {
+/** ✅ Boutons dynamiques Claim/Unclaim :
+ * - non claim => Claim vert
+ * - claim => Unclaim rouge
+ */
+function buildTicketControls(ticketId, isClaimed) {
+  const claimBtn = isClaimed
+    ? new ButtonBuilder()
+        .setCustomId(`ticket:claim:${ticketId}`)
+        .setLabel("Unclaim")
+        .setStyle(ButtonStyle.Danger)
+    : new ButtonBuilder()
+        .setCustomId(`ticket:claim:${ticketId}`)
+        .setLabel("Claim")
+        .setStyle(ButtonStyle.Success);
+
+  return new ActionRowBuilder().addComponents(
+    claimBtn,
+    new ButtonBuilder()
+      .setCustomId(`ticket:close:${ticketId}`)
+      .setLabel("Fermer")
+      .setStyle(ButtonStyle.Primary),
+    new ButtonBuilder()
+      .setCustomId(`ticket:transcript:${ticketId}`)
+      .setLabel("Transcript (admin)")
+      .setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder()
+      .setCustomId(`ticket:delete:${ticketId}`)
+      .setLabel("Supprimer (admin)")
+      .setStyle(ButtonStyle.Danger)
+  );
+}
+
+async function updateTicketMessage(interaction, data) {
   // On édite le message qui contient les boutons (celui du bot)
   const msg = interaction.message;
   if (!msg || !msg.edit) return;
 
   const embed = buildTicketEmbed(data);
+  const controls = buildTicketControls(data.ticketId, Boolean(data.claimedBy));
 
-  // On garde exactement les mêmes boutons
   await msg
     .edit({
       content: msg.content ?? undefined,
       embeds: [embed],
-      components: msg.components,
+      components: [controls],
     })
     .catch(() => {});
 }
@@ -248,9 +278,7 @@ function createTicketsService({ pool, config }) {
     .setName("ticket-config")
     .setDescription("ADMIN: Configure le système de tickets")
     .addSubcommand((sub) =>
-      sub
-        .setName("show")
-        .setDescription("Affiche la configuration actuelle")
+      sub.setName("show").setDescription("Affiche la configuration actuelle")
     )
     .addSubcommand((sub) =>
       sub
@@ -354,8 +382,16 @@ function createTicketsService({ pool, config }) {
       if (row[k] !== null && row[k] !== undefined) merged[k] = row[k];
     }
 
-    merged.max_open_per_user = clamp(Number(merged.max_open_per_user || 1), 1, 5);
-    merged.cooldown_seconds = clamp(Number(merged.cooldown_seconds || 0), 0, 86400);
+    merged.max_open_per_user = clamp(
+      Number(merged.max_open_per_user || 1),
+      1,
+      5
+    );
+    merged.cooldown_seconds = clamp(
+      Number(merged.cooldown_seconds || 0),
+      0,
+      86400
+    );
 
     return merged;
   }
@@ -398,7 +434,9 @@ function createTicketsService({ pool, config }) {
   function isStaff(interaction, settings) {
     if (isAdmin(interaction)) return true;
     if (!settings.staff_role_id) return false;
-    return Boolean(interaction.member?.roles?.cache?.has?.(settings.staff_role_id));
+    return Boolean(
+      interaction.member?.roles?.cache?.has?.(settings.staff_role_id)
+    );
   }
 
   /* ---------------- Panel creation ---------------- */
@@ -431,7 +469,11 @@ function createTicketsService({ pool, config }) {
       if (!categories) {
         categories = [
           { label: "Support", value: "support", description: "Questions / aide" },
-          { label: "Signalement", value: "signalement", description: "Report / problème" },
+          {
+            label: "Signalement",
+            value: "signalement",
+            description: "Report / problème",
+          },
         ];
       }
     }
@@ -506,7 +548,10 @@ function createTicketsService({ pool, config }) {
     );
 
     if ((openRes.rows[0]?.c || 0) >= settings.max_open_per_user) {
-      return { ok: false, message: `⛔ Tu as déjà ${openRes.rows[0].c} ticket(s) ouvert(s).` };
+      return {
+        ok: false,
+        message: `⛔ Tu as déjà ${openRes.rows[0].c} ticket(s) ouvert(s).`,
+      };
     }
 
     const lastRes = await pool.query(
@@ -523,7 +568,10 @@ function createTicketsService({ pool, config }) {
       const diffSec = Math.floor((Date.now() - last) / 1000);
       if (diffSec < settings.cooldown_seconds) {
         const left = settings.cooldown_seconds - diffSec;
-        return { ok: false, message: `⏳ Cooldown: réessaie dans ${Math.ceil(left / 60)} min.` };
+        return {
+          ok: false,
+          message: `⏳ Cooldown: réessaie dans ${Math.ceil(left / 60)} min.`,
+        };
       }
     }
 
@@ -540,7 +588,8 @@ function createTicketsService({ pool, config }) {
     const settings = await getSettings(guild.id);
     if (!settings.category_id) {
       await replyEphemeral(interaction, {
-        content: "⚠️ Catégorie tickets non configurée. Fais `/ticket-config set category:...`.",
+        content:
+          "⚠️ Catégorie tickets non configurée. Fais `/ticket-config set category:...`.",
       });
       return true;
     }
@@ -556,7 +605,10 @@ function createTicketsService({ pool, config }) {
     const channelName = makeSafeChannelName(interaction.user.username, suffix);
 
     const overwrites = [
-      { id: guild.roles.everyone.id, deny: [PermissionsBitField.Flags.ViewChannel] },
+      {
+        id: guild.roles.everyone.id,
+        deny: [PermissionsBitField.Flags.ViewChannel],
+      },
       {
         id: interaction.user.id,
         allow: [
@@ -609,7 +661,8 @@ function createTicketsService({ pool, config }) {
       });
     } catch (e) {
       await replyEphemeral(interaction, {
-        content: "⚠️ Impossible de créer le salon ticket (permissions/catégorie invalide).",
+        content:
+          "⚠️ Impossible de créer le salon ticket (permissions/catégorie invalide).",
       });
       return true;
     }
@@ -624,15 +677,10 @@ function createTicketsService({ pool, config }) {
       openerId: interaction.user.id,
       categoryLabel: categoryLabel || "Support",
       ticketId,
-      claimedBy: null, // ✅ non pris en charge au départ
+      claimedBy: null,
     });
 
-    const controls = new ActionRowBuilder().addComponents(
-      new ButtonBuilder().setCustomId(`ticket:claim:${ticketId}`).setLabel("Claim").setStyle(ButtonStyle.Secondary),
-      new ButtonBuilder().setCustomId(`ticket:close:${ticketId}`).setLabel("Fermer").setStyle(ButtonStyle.Primary),
-      new ButtonBuilder().setCustomId(`ticket:transcript:${ticketId}`).setLabel("Transcript (admin)").setStyle(ButtonStyle.Secondary),
-      new ButtonBuilder().setCustomId(`ticket:delete:${ticketId}`).setLabel("Supprimer (admin)").setStyle(ButtonStyle.Danger)
-    );
+    const controls = buildTicketControls(ticketId, false);
 
     await channel.send({
       content: `<@${interaction.user.id}>`,
@@ -668,44 +716,87 @@ function createTicketsService({ pool, config }) {
     return ch;
   }
 
+  /** ✅ Toggle Claim / Unclaim + update embed + update bouton couleur */
   async function doClaim(interaction, ticketId) {
     const ticket = await getTicket(ticketId);
-    if (!ticket) return replyEphemeral(interaction, { content: "⚠️ Ticket introuvable." });
-
-    const settings = await getSettings(ticket.guild_id);
-    if (!isStaff(interaction, settings))
-      return replyEphemeral(interaction, { content: "⛔ Staff/Admin uniquement." });
-
-    if (ticket.status !== "open")
-      return replyEphemeral(interaction, { content: "⚠️ Ticket déjà fermé." });
-
-    if (ticket.claimed_by && ticket.claimed_by !== interaction.user.id)
-      return replyEphemeral(interaction, { content: `⚠️ Déjà claim par <@${ticket.claimed_by}>.` });
-
-    await pool.query(`UPDATE tickets SET claimed_by=$2 WHERE ticket_id=$1`, [
-      ticketId,
-      interaction.user.id,
-    ]);
-
-    // Optionnel: claim exclusif
-    if (settings.claim_exclusive && settings.staff_role_id && interaction.channel) {
-      await interaction.channel.permissionOverwrites
-        .edit(settings.staff_role_id, { SendMessages: false })
-        .catch(() => {});
-      await interaction.channel.permissionOverwrites
-        .edit(interaction.user.id, { SendMessages: true, ViewChannel: true })
-        .catch(() => {});
+    if (!ticket) {
+      await replyEphemeral(interaction, { content: "⚠️ Ticket introuvable." });
+      return true;
     }
 
-    // ✅ Update embed (ta demande)
-    await updateTicketMessageEmbed(interaction, {
+    const settings = await getSettings(ticket.guild_id);
+    if (!isStaff(interaction, settings)) {
+      await replyEphemeral(interaction, { content: "⛔ Staff/Admin uniquement." });
+      return true;
+    }
+
+    if (ticket.status !== "open") {
+      await replyEphemeral(interaction, { content: "⚠️ Ticket déjà fermé." });
+      return true;
+    }
+
+    // --- Toggle logic ---
+    // - Not claimed => claim by clicker
+    // - Claimed by self => unclaim
+    // - Claimed by other => deny (admin peut unclaim)
+    let newClaimedBy = null;
+    let msg = "";
+
+    if (!ticket.claimed_by) {
+      newClaimedBy = interaction.user.id;
+
+      await pool.query(
+        `UPDATE tickets SET claimed_by=$2 WHERE ticket_id=$1`,
+        [ticketId, newClaimedBy]
+      );
+
+      // claim exclusif => couper l'envoi aux autres staff
+      if (settings.claim_exclusive && settings.staff_role_id && interaction.channel) {
+        await interaction.channel.permissionOverwrites
+          .edit(settings.staff_role_id, { SendMessages: false })
+          .catch(() => {});
+        await interaction.channel.permissionOverwrites
+          .edit(newClaimedBy, { SendMessages: true, ViewChannel: true })
+          .catch(() => {});
+      }
+
+      msg = `✅ Ticket pris en charge par **${interaction.user.username}**.`;
+    } else {
+      const canUnclaim =
+        ticket.claimed_by === interaction.user.id || isAdmin(interaction);
+
+      if (!canUnclaim) {
+        await replyEphemeral(interaction, {
+          content: `⚠️ Déjà pris en charge par <@${ticket.claimed_by}>.`,
+        });
+        return true;
+      }
+
+      await pool.query(`UPDATE tickets SET claimed_by=NULL WHERE ticket_id=$1`, [
+        ticketId,
+      ]);
+
+      // Si claim exclusif activé, on rend l'envoi au staff_role
+      if (settings.claim_exclusive && settings.staff_role_id && interaction.channel) {
+        await interaction.channel.permissionOverwrites
+          .edit(settings.staff_role_id, { SendMessages: true })
+          .catch(() => {});
+      }
+
+      newClaimedBy = null;
+      msg = `🟥 Ticket non pris en charge.`;
+    }
+
+    // Update embed + boutons (couleurs)
+    await updateTicketMessage(interaction, {
       openerId: ticket.opener_id,
       categoryLabel: ticket.category_label || "Support",
       ticketId,
-      claimedBy: interaction.user.id,
+      claimedBy: newClaimedBy,
     });
 
-    await interaction.reply({ content: `✅ Ticket claim par <@${interaction.user.id}>.` }).catch(() => {});
+    // Message d'info dans le ticket (non-ephemeral)
+    await interaction.reply({ content: msg }).catch(() => {});
     return true;
   }
 
@@ -726,24 +817,44 @@ function createTicketsService({ pool, config }) {
       .setTimestamp();
 
     const row = new ActionRowBuilder().addComponents(
-      new ButtonBuilder().setCustomId(`ticket:rate:${ticketId}:1`).setLabel("⭐ 1").setStyle(ButtonStyle.Secondary),
-      new ButtonBuilder().setCustomId(`ticket:rate:${ticketId}:2`).setLabel("⭐ 2").setStyle(ButtonStyle.Secondary),
-      new ButtonBuilder().setCustomId(`ticket:rate:${ticketId}:3`).setLabel("⭐ 3").setStyle(ButtonStyle.Secondary),
-      new ButtonBuilder().setCustomId(`ticket:rate:${ticketId}:4`).setLabel("⭐ 4").setStyle(ButtonStyle.Secondary),
-      new ButtonBuilder().setCustomId(`ticket:rate:${ticketId}:5`).setLabel("⭐ 5").setStyle(ButtonStyle.Primary)
+      new ButtonBuilder()
+        .setCustomId(`ticket:rate:${ticketId}:1`)
+        .setLabel("⭐ 1")
+        .setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder()
+        .setCustomId(`ticket:rate:${ticketId}:2`)
+        .setLabel("⭐ 2")
+        .setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder()
+        .setCustomId(`ticket:rate:${ticketId}:3`)
+        .setLabel("⭐ 3")
+        .setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder()
+        .setCustomId(`ticket:rate:${ticketId}:4`)
+        .setLabel("⭐ 4")
+        .setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder()
+        .setCustomId(`ticket:rate:${ticketId}:5`)
+        .setLabel("⭐ 5")
+        .setStyle(ButtonStyle.Primary)
     );
 
     if (opener) {
-      const dmOk = await opener.send({ embeds: [embed], components: [row] }).then(() => true).catch(() => false);
+      const dmOk = await opener
+        .send({ embeds: [embed], components: [row] })
+        .then(() => true)
+        .catch(() => false);
       if (dmOk) return;
     }
 
     if (interaction.channel?.isTextBased?.()) {
-      await interaction.channel.send({
-        content: `<@${ticketRow.opener_id}>`,
-        embeds: [embed],
-        components: [row],
-      }).catch(() => {});
+      await interaction.channel
+        .send({
+          content: `<@${ticketRow.opener_id}>`,
+          embeds: [embed],
+          components: [row],
+        })
+        .catch(() => {});
     }
   }
 
@@ -758,7 +869,10 @@ function createTicketsService({ pool, config }) {
     if (ticket.status !== "open")
       return replyEphemeral(interaction, { content: "⚠️ Ticket déjà fermé." });
 
-    await pool.query(`UPDATE tickets SET status='closed', closed_at=NOW() WHERE ticket_id=$1`, [ticketId]);
+    await pool.query(
+      `UPDATE tickets SET status='closed', closed_at=NOW() WHERE ticket_id=$1`,
+      [ticketId]
+    );
 
     if (interaction.channel) {
       await interaction.channel.permissionOverwrites
@@ -766,19 +880,25 @@ function createTicketsService({ pool, config }) {
         .catch(() => {});
     }
 
-    await interaction.reply({ content: `🔒 Ticket fermé par <@${interaction.user.id}>.` }).catch(() => {});
+    await interaction
+      .reply({ content: `🔒 Ticket fermé par <@${interaction.user.id}>.` })
+      .catch(() => {});
 
     // transcript -> DB + salon admin
     if (interaction.channel?.isTextBased?.()) {
-      const messages = await fetchAllMessages(interaction.channel, 1000).catch(() => []);
+      const messages = await fetchAllMessages(interaction.channel, 1000).catch(
+        () => []
+      );
       let content = renderTranscript(interaction.channel, messages);
 
       const maxBytes = 7 * 1024 * 1024;
       const buf = Buffer.from(content, "utf8");
       if (buf.length > maxBytes) {
         content =
-          content.slice(0, Math.floor((maxBytes / buf.length) * content.length)) +
-          `\n\n[TRUNCATED] Transcript trop long, coupé.\n`;
+          content.slice(
+            0,
+            Math.floor((maxBytes / buf.length) * content.length)
+          ) + `\n\n[TRUNCATED] Transcript trop long, coupé.\n`;
       }
 
       await pool.query(
@@ -790,7 +910,11 @@ function createTicketsService({ pool, config }) {
 
       const guild = await client.guilds.fetch(ticket.guild_id).catch(() => null);
       if (guild) {
-        const adminTranscriptChannel = await fetchAdminChannel(guild, settings, "transcript");
+        const adminTranscriptChannel = await fetchAdminChannel(
+          guild,
+          settings,
+          "transcript"
+        );
         if (adminTranscriptChannel) {
           const file = new AttachmentBuilder(Buffer.from(content, "utf8"), {
             name: `ticket-${ticketId}.txt`,
@@ -801,12 +925,22 @@ function createTicketsService({ pool, config }) {
             .addFields(
               { name: "Ticket", value: `\`${ticketId}\`` },
               { name: "Auteur", value: `<@${ticket.opener_id}>`, inline: true },
-              { name: "Traité par", value: ticket.claimed_by ? `<@${ticket.claimed_by}>` : "—", inline: true },
-              { name: "Catégorie", value: ticket.category_label || "Support", inline: true }
+              {
+                name: "Traité par",
+                value: ticket.claimed_by ? `<@${ticket.claimed_by}>` : "—",
+                inline: true,
+              },
+              {
+                name: "Catégorie",
+                value: ticket.category_label || "Support",
+                inline: true,
+              }
             )
             .setTimestamp();
 
-          await adminTranscriptChannel.send({ embeds: [embed], files: [file] }).catch(() => {});
+          await adminTranscriptChannel
+            .send({ embeds: [embed], files: [file] })
+            .catch(() => {});
         }
       }
     }
@@ -815,7 +949,9 @@ function createTicketsService({ pool, config }) {
 
     if (settings.delete_on_close && interaction.channel) {
       setTimeout(() => {
-        interaction.channel.delete("Ticket auto-delete after close").catch(() => {});
+        interaction.channel
+          .delete("Ticket auto-delete after close")
+          .catch(() => {});
       }, 10_000);
     }
 
@@ -838,7 +974,9 @@ function createTicketsService({ pool, config }) {
     await pool.query(`DELETE FROM tickets WHERE ticket_id=$1`, [ticketId]);
 
     if (interaction.isRepliable?.()) {
-      await replyEphemeral(interaction, { content: "✅ Ticket supprimé." }).catch(() => {});
+      await replyEphemeral(interaction, { content: "✅ Ticket supprimé." }).catch(
+        () => {}
+      );
     }
     return true;
   }
@@ -876,7 +1014,11 @@ function createTicketsService({ pool, config }) {
       }
     }
 
-    const adminTranscriptChannel = await fetchAdminChannel(guild, settings, "transcript");
+    const adminTranscriptChannel = await fetchAdminChannel(
+      guild,
+      settings,
+      "transcript"
+    );
     if (!adminTranscriptChannel) {
       return replyEphemeral(interaction, {
         content:
@@ -886,7 +1028,8 @@ function createTicketsService({ pool, config }) {
 
     if (!content) {
       return replyEphemeral(interaction, {
-        content: "⚠️ Transcript indisponible (salon supprimé et pas de transcript en DB).",
+        content:
+          "⚠️ Transcript indisponible (salon supprimé et pas de transcript en DB).",
       });
     }
 
@@ -899,11 +1042,17 @@ function createTicketsService({ pool, config }) {
       .addFields(
         { name: "Ticket", value: `\`${ticketId}\`` },
         { name: "Auteur", value: `<@${ticket.opener_id}>`, inline: true },
-        { name: "Traité par", value: ticket.claimed_by ? `<@${ticket.claimed_by}>` : "—", inline: true }
+        {
+          name: "Traité par",
+          value: ticket.claimed_by ? `<@${ticket.claimed_by}>` : "—",
+          inline: true,
+        }
       )
       .setTimestamp();
 
-    await adminTranscriptChannel.send({ embeds: [embed], files: [file] }).catch(() => {});
+    await adminTranscriptChannel
+      .send({ embeds: [embed], files: [file] })
+      .catch(() => {});
     await replyEphemeral(interaction, {
       content: `✅ Transcript envoyé dans <#${adminTranscriptChannel.id}>.`,
     });
@@ -923,7 +1072,9 @@ function createTicketsService({ pool, config }) {
     if (!ticket) return replyEphemeral(interaction, { content: "⚠️ Ticket introuvable." });
 
     if (interaction.user.id !== ticket.opener_id)
-      return replyEphemeral(interaction, { content: "⛔ Seul l’auteur du ticket peut noter." });
+      return replyEphemeral(interaction, {
+        content: "⛔ Seul l’auteur du ticket peut noter.",
+      });
 
     const r = clamp(Number(rating || 0), 1, 5);
     const settings = await getSettings(ticket.guild_id);
@@ -951,12 +1102,25 @@ function createTicketsService({ pool, config }) {
             { name: "Ticket", value: `\`${ticketId}\`` },
             { name: "Note", value: `${buildStars(r)} (${r}/5)`, inline: true },
             { name: "Auteur", value: `<@${ticket.opener_id}>`, inline: true },
-            { name: "Traité par", value: ticket.claimed_by ? `<@${ticket.claimed_by}>` : "—", inline: true },
-            { name: "Catégorie", value: ticket.category_label || "Support", inline: true }
+            {
+              name: "Traité par",
+              value: ticket.claimed_by ? `<@${ticket.claimed_by}>` : "—",
+              inline: true,
+            },
+            {
+              name: "Catégorie",
+              value: ticket.category_label || "Support",
+              inline: true,
+            }
           )
           .setTimestamp();
 
-        if (fb.comment) embed.addFields({ name: "Commentaire", value: String(fb.comment).slice(0, 1024) });
+        if (fb.comment) {
+          embed.addFields({
+            name: "Commentaire",
+            value: String(fb.comment).slice(0, 1024),
+          });
+        }
 
         if (fb.log_channel_id && fb.log_message_id) {
           const ch = await guild.channels.fetch(fb.log_channel_id).catch(() => null);
@@ -977,7 +1141,6 @@ function createTicketsService({ pool, config }) {
       }
     }
 
-    // modal commentaire (facultatif)
     const modal = new ModalBuilder()
       .setCustomId(`ticket:comment:${ticketId}:${r}`)
       .setTitle("Commentaire (facultatif)");
@@ -992,7 +1155,9 @@ function createTicketsService({ pool, config }) {
     modal.addComponents(new ActionRowBuilder().addComponents(input));
 
     await interaction.showModal(modal).catch(async () => {
-      await replyEphemeral(interaction, { content: `Merci ! Note reçue : ${buildStars(r)}` }).catch(() => {});
+      await replyEphemeral(interaction, {
+        content: `Merci ! Note reçue : ${buildStars(r)}`,
+      }).catch(() => {});
     });
 
     return true;
@@ -1003,7 +1168,9 @@ function createTicketsService({ pool, config }) {
     if (!ticket) return replyEphemeral(interaction, { content: "⚠️ Ticket introuvable." });
 
     if (interaction.user.id !== ticket.opener_id)
-      return replyEphemeral(interaction, { content: "⛔ Seul l’auteur du ticket peut commenter." });
+      return replyEphemeral(interaction, {
+        content: "⛔ Seul l’auteur du ticket peut commenter.",
+      });
 
     const comment = (interaction.fields.getTextInputValue("comment") || "").trim();
     const r = clamp(Number(rating || 0), 1, 5);
@@ -1013,7 +1180,6 @@ function createTicketsService({ pool, config }) {
       [ticketId, comment || null, r]
     );
 
-    // refresh log admin
     const settings = await getSettings(ticket.guild_id);
     const guild = await client.guilds.fetch(ticket.guild_id).catch(() => null);
     if (guild) {
@@ -1031,8 +1197,16 @@ function createTicketsService({ pool, config }) {
             { name: "Ticket", value: `\`${ticketId}\`` },
             { name: "Note", value: `${buildStars(r)} (${r}/5)`, inline: true },
             { name: "Auteur", value: `<@${ticket.opener_id}>`, inline: true },
-            { name: "Traité par", value: ticket.claimed_by ? `<@${ticket.claimed_by}>` : "—", inline: true },
-            { name: "Catégorie", value: ticket.category_label || "Support", inline: true },
+            {
+              name: "Traité par",
+              value: ticket.claimed_by ? `<@${ticket.claimed_by}>` : "—",
+              inline: true,
+            },
+            {
+              name: "Catégorie",
+              value: ticket.category_label || "Support",
+              inline: true,
+            },
             { name: "Commentaire", value: comment ? comment.slice(0, 1024) : "—" }
           )
           .setTimestamp();
@@ -1056,7 +1230,9 @@ function createTicketsService({ pool, config }) {
       }
     }
 
-    await replyEphemeral(interaction, { content: "✅ Merci ! Ton feedback a été enregistré." }).catch(() => {});
+    await replyEphemeral(interaction, {
+      content: "✅ Merci ! Ton feedback a été enregistré.",
+    }).catch(() => {});
     return true;
   }
 
@@ -1113,7 +1289,11 @@ function createTicketsService({ pool, config }) {
         { name: "Période", value: `${days} jours`, inline: true },
         { name: "Tickets créés", value: `${t1.rows[0]?.total || 0}`, inline: true },
         { name: "Tickets fermés", value: `${t2.rows[0]?.total_closed || 0}`, inline: true },
-        { name: "Feedbacks", value: `${f1.rows[0]?.total_feedback || 0} • moyenne: **${avg}/5**`, inline: false },
+        {
+          name: "Feedbacks",
+          value: `${f1.rows[0]?.total_feedback || 0} • moyenne: **${avg}/5**`,
+          inline: false,
+        },
         { name: "Répartition", value: distLine || "—", inline: false }
       )
       .setTimestamp();
