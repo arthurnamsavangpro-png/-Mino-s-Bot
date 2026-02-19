@@ -374,40 +374,52 @@ function createVouchesService({ pool, config, rankup }) {
       return true;
     }
 
-    // /topvouches
-    if (name === "topvouches") {
-      const limit = interaction.options.getInteger("limit") ?? 5;
+// /topvouches ✅ PRIVÉ (EPHEMERAL)
+if (name === "topvouches") {
+  if (!interaction.guildId) {
+    await interaction.reply({
+      content: "⚠️ Cette commande marche dans un serveur.",
+      ephemeral: true,
+    });
+    return true;
+  }
 
-      const top = await pool.query(
-        `SELECT vouched_id, COUNT(*)::int AS count, AVG(rating)::float AS avg
-         FROM vouches
-         WHERE guild_id=$1
-         GROUP BY vouched_id
-         ORDER BY count DESC
-         LIMIT $2`,
-        [interaction.guildId, limit]
-      );
+  await interaction.deferReply({ ephemeral: true });
 
-      if (!top.rows.length) {
-        await interaction.reply({ content: "Aucun vouch dans ce serveur pour le moment." });
-        return true;
-      }
+  const limit = interaction.options.getInteger("limit") ?? 5;
 
-      const desc = top.rows
-        .map((r, i) => {
-          const avg = r.avg ? r.avg.toFixed(2) : "N/A";
-          return `**${i + 1}.** <@${r.vouched_id}> — **${r.count}** vouches — **${avg}/5**`;
-        })
-        .join("\n");
+  const top = await pool.query(
+    `SELECT vouched_id, COUNT(*)::int AS count, AVG(rating)::float AS avg
+     FROM vouches
+     WHERE guild_id=$1
+     GROUP BY vouched_id
+     ORDER BY count DESC
+     LIMIT $2`,
+    [interaction.guildId, limit]
+  );
 
-      const embed = new EmbedBuilder()
-        .setTitle("🏆 Top Vouches")
-        .setDescription(desc)
-        .setTimestamp();
+  if (!top.rows.length) {
+    await interaction.editReply({
+      content: "Aucun vouch dans ce serveur pour le moment.",
+    });
+    return true;
+  }
 
-      await interaction.reply({ embeds: [embed] });
-      return true;
-    }
+  const desc = top.rows
+    .map((r, i) => {
+      const avg = r.avg ? r.avg.toFixed(2) : "N/A";
+      return `**${i + 1}.** <@${r.vouched_id}> — **${r.count}** vouches — **${avg}/5**`;
+    })
+    .join("\n");
+
+  const embed = new EmbedBuilder()
+    .setTitle("🏆 Top Vouches")
+    .setDescription(desc)
+    .setTimestamp();
+
+  await interaction.editReply({ embeds: [embed] });
+  return true;
+}
 
     return false; // pas géré ici
   }
