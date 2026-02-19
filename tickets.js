@@ -377,14 +377,11 @@ function createTicketsService({ pool, config }) {
         .setRequired(false)
         .setMaxLength(1500)
     )
-    // ✅ IMPORTANT: option unique qui sert de "raison libre" en mode simple
-    // et de "liste de catégories" en mode categories
+    // ✅ FIX: description <= 100 caractères (Discord constraint)
     .addStringOption((opt) =>
       opt
         .setName("categories")
-        .setDescription(
-          "Mode simple: Raison libre (ex: Test). Mode categories: liste (ex: Support|Aide, Recrutement|Candidature)"
-        )
+        .setDescription("Simple: raison libre. Categories: liste (Support|Aide, Recrutement|Candidature)")
         .setRequired(false)
         .setMaxLength(1000)
     );
@@ -559,8 +556,8 @@ function createTicketsService({ pool, config }) {
 
     const panelId = crypto.randomUUID();
 
-    // ✅ FIX: mode simple -> "categories" = raison libre
-    // mode categories -> "categories" = liste de catégories
+    // mode simple -> option "categories" = raison libre
+    // mode categories -> option "categories" = liste
     const rawCategoriesOrReason = interaction.options.getString("categories") || "";
     let modePayload = null;
 
@@ -578,9 +575,7 @@ function createTicketsService({ pool, config }) {
         ),
       ];
     } else {
-      const categories =
-        parseCategories(rawCategoriesOrReason) || PRESET_CATEGORIES;
-
+      const categories = parseCategories(rawCategoriesOrReason) || PRESET_CATEGORIES;
       modePayload = { categories };
 
       components = [
@@ -695,10 +690,7 @@ function createTicketsService({ pool, config }) {
     });
 
     const overwrites = [
-      {
-        id: guild.roles.everyone.id,
-        deny: [PermissionsBitField.Flags.ViewChannel],
-      },
+      { id: guild.roles.everyone.id, deny: [PermissionsBitField.Flags.ViewChannel] },
       {
         id: interaction.user.id,
         allow: [
@@ -831,16 +823,12 @@ function createTicketsService({ pool, config }) {
     if (!settings.claim_exclusive || !settings.staff_role_id || !channel) return;
 
     if (finalClaimedBy) {
-      await channel.permissionOverwrites
-        .edit(settings.staff_role_id, { SendMessages: false })
-        .catch(() => {});
+      await channel.permissionOverwrites.edit(settings.staff_role_id, { SendMessages: false }).catch(() => {});
       await channel.permissionOverwrites
         .edit(finalClaimedBy, { SendMessages: true, ViewChannel: true })
         .catch(() => {});
     } else {
-      await channel.permissionOverwrites
-        .edit(settings.staff_role_id, { SendMessages: true })
-        .catch(() => {});
+      await channel.permissionOverwrites.edit(settings.staff_role_id, { SendMessages: true }).catch(() => {});
     }
   }
 
@@ -1166,10 +1154,7 @@ function createTicketsService({ pool, config }) {
       const settings = await getSettings(ticket.guild_id);
 
       let content = null;
-      const tRes = await pool.query(
-        `SELECT content FROM ticket_transcripts WHERE ticket_id=$1 LIMIT 1`,
-        [ticketId]
-      );
+      const tRes = await pool.query(`SELECT content FROM ticket_transcripts WHERE ticket_id=$1 LIMIT 1`, [ticketId]);
       content = tRes.rows[0]?.content || null;
 
       const guild = await client.guilds.fetch(ticket.guild_id).catch(() => null);
@@ -1221,9 +1206,7 @@ function createTicketsService({ pool, config }) {
         .setTimestamp();
 
       await adminTranscriptChannel.send({ embeds: [embed], files: [file] }).catch(() => {});
-      await safeFollowUpEphemeral(interaction, {
-        content: `✅ Transcript envoyé dans <#${adminTranscriptChannel.id}>.`,
-      });
+      await safeFollowUpEphemeral(interaction, { content: `✅ Transcript envoyé dans <#${adminTranscriptChannel.id}>.` });
 
       return true;
     } catch {
@@ -1235,10 +1218,11 @@ function createTicketsService({ pool, config }) {
   }
 
   async function upsertFeedbackLogMessage(ticketId, channelId, messageId) {
-    await pool.query(
-      `UPDATE ticket_feedback SET log_channel_id=$2, log_message_id=$3 WHERE ticket_id=$1`,
-      [ticketId, channelId, messageId]
-    );
+    await pool.query(`UPDATE ticket_feedback SET log_channel_id=$2, log_message_id=$3 WHERE ticket_id=$1`, [
+      ticketId,
+      channelId,
+      messageId,
+    ]);
   }
 
   async function doRate(interaction, ticketId, rating) {
@@ -1325,9 +1309,7 @@ function createTicketsService({ pool, config }) {
 
         if (fb.log_channel_id && fb.log_message_id) {
           const ch = await guild.channels.fetch(fb.log_channel_id).catch(() => null);
-          const msg = ch?.isTextBased?.()
-            ? await ch.messages.fetch(fb.log_message_id).catch(() => null)
-            : null;
+          const msg = ch?.isTextBased?.() ? await ch.messages.fetch(fb.log_message_id).catch(() => null) : null;
 
           if (msg) {
             await msg.edit({ embeds: [embed] }).catch(() => {});
@@ -1447,7 +1429,6 @@ function createTicketsService({ pool, config }) {
       const action = parts[1];
 
       if (action === "open") {
-        // ✅ FIX: mode simple -> récupérer la raison libre stockée dans le panel
         const panelId = parts[2];
         const panel = await getPanel(panelId);
         const payload = parsePanelPayload(panel?.categories);
