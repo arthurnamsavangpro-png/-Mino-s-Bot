@@ -147,23 +147,36 @@ client.once("ready", async () => {
 });
 
 client.on("interactionCreate", async (interaction) => {
-  // IMPORTANT: handle en premier send-message (car gère aussi les MODALS)
-  if (await sendMessage.handleInteraction(interaction)) return;
+  try {
+    // IMPORTANT: en premier (gère aussi les MODALS)
+    if (await sendMessage.handleInteraction(interaction)) return;
 
-  // Le reste ne traite que les slash commands
-  if (!interaction.isChatInputCommand()) return;
+    // le reste : slash uniquement
+    if (!interaction.isChatInputCommand()) return;
 
-  if (interaction.commandName === "ping") {
-    const sent = await interaction.reply({ content: "pong 🏓", fetchReply: true });
-    const latency = sent.createdTimestamp - interaction.createdTimestamp;
-    return interaction.editReply(`pong 🏓 (latence: ${latency}ms)`);
+    if (interaction.commandName === "ping") {
+      const sent = await interaction.reply({ content: "pong 🏓", fetchReply: true });
+      const latency = sent.createdTimestamp - interaction.createdTimestamp;
+      return interaction.editReply(`pong 🏓 (latence: ${latency}ms)`);
+    }
+
+    if (await vouches.handleInteraction(interaction, client)) return;
+    if (await rankup.handleInteraction(interaction)) return;
+  } catch (e) {
+    console.error("interactionCreate fatal:", e);
+
+    // Fallback anti-timeout : si possible on répond quand même
+    if (interaction?.isRepliable?.()) {
+      if (!interaction.deferred && !interaction.replied) {
+        await interaction.reply({
+          content: "⚠️ Une erreur interne est survenue (voir logs).",
+          ephemeral: true,
+        }).catch(() => {});
+      } else if (interaction.deferred && !interaction.replied) {
+        await interaction.editReply("⚠️ Une erreur interne est survenue (voir logs).").catch(() => {});
+      }
+    }
   }
-
-  // Vouches module
-  if (await vouches.handleInteraction(interaction, client)) return;
-
-  // Rankup module
-  if (await rankup.handleInteraction(interaction)) return;
 });
 
 client.login(TOKEN);
