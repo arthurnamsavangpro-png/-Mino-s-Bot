@@ -5,17 +5,20 @@ const {
   Routes,
   SlashCommandBuilder,
   EmbedBuilder,
+  PermissionsBitField,
 } = require("discord.js");
 
 const { Pool } = require("pg");
 
 const TOKEN = process.env.DISCORD_TOKEN;
-const CLIENT_ID = process.env.CLIENT_ID;
-const GUILD_ID = process.env.GUILD_ID;
+const CLIENT_ID = process.env.CLIENT_ID; // Application ID
+const GUILD_ID = process.env.GUILD_ID; // ID du serveur (pour enregistrer vite les slash commands)
 
-// Optionnel : si tu veux forcer les vouch dans un salon précis
-// Mets l'ID du salon dans Railway -> Variables : VOUCH_CHANNEL_ID=123...
+// Optionnel : forcer les vouchs dans un salon précis
 const VOUCH_CHANNEL_ID = process.env.VOUCH_CHANNEL_ID || null;
+
+// Rafraîchissement du leaderboard auto (par défaut 60s)
+const VOUCHBOARD_REFRESH_MS = Number(process.env.VOUCHBOARD_REFRESH_MS || 60000);
 
 if (!TOKEN || !CLIENT_ID || !GUILD_ID) {
   console.error("Variables manquantes. Ajoute DISCORD_TOKEN, CLIENT_ID, GUILD_ID.");
@@ -47,8 +50,17 @@ async function initDb() {
 
     CREATE INDEX IF NOT EXISTS idx_vouches_guild_vouched ON vouches (guild_id, vouched_id);
     CREATE INDEX IF NOT EXISTS idx_vouches_guild_voucher_vouched ON vouches (guild_id, voucher_id, vouched_id);
+
+    -- Message “classement” qui s’actualise
+    CREATE TABLE IF NOT EXISTS vouchboard (
+      guild_id TEXT PRIMARY KEY,
+      channel_id TEXT NOT NULL,
+      message_id TEXT NOT NULL,
+      limit_count INTEGER NOT NULL DEFAULT 10,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
   `);
-  console.log("✅ DB prête (table vouches OK).");
+  console.log("✅ DB prête (tables vouches + vouchboard OK).");
 }
 
 const client = new Client({
@@ -57,9 +69,7 @@ const client = new Client({
 
 async function registerCommands() {
   const commands = [
-    new SlashCommandBuilder()
-      .setName("ping")
-      .setDescription("Répond pong + latence"),
+    new SlashCommandBuilder().setName("ping").setDescription("Répond pong + latence"),
 
     new SlashCommandBuilder()
       .setName("vouch")
@@ -101,10 +111,32 @@ async function registerCommands() {
           .setMaxValue(10)
           .setRequired(false)
       ),
+
+    // ✅ Commandes pour le message auto-refresh
+    new SlashCommandBuilder()
+      .setName("setvouchboard")
+      .setDescription("Crée (ou déplace) le message de classement auto dans ce salon")
+      .addIntegerOption((opt) =>
+        opt
+          .setName("limit")
+          .setDescription("Top N (max 10)")
+          .setMinValue(3)
+          .setMaxValue(10)
+          .setRequired(false)
+      ),
+
+    new SlashCommandBuilder()
+      .setName("removevouchboard")
+      .setDescription("Désactive la mise à jour auto du classement des vouchs"),
   ].map((c) => c.toJSON());
 
   const rest = new REST({ version: "10" }).setToken(TOKEN);
-  await rest.put(Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID), { body: commands });
+
+  // Enregistrement GUILD (instantané). Global peut prendre du temps.
+  await rest.put(Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID), {
+    body: commands,
+  });
+
   console.log("✅ Slash commands enregistrées sur le serveur.");
 }
 
@@ -112,11 +144,119 @@ function hoursBetween(a, b) {
   return Math.abs(a.getTime() - b.getTime()) / (1000 * 60 * 60);
 }
 
+/* -------------------------------
+   VOUCHBOARD (embed auto-refresh)
+-------------------------------- */
+
+async function getVouchboardConfig(guildId) {
+  const res = await pool.query(
+    `SELECT channel_id, message_id, limit_count
+     FROM vouchboard
+     WHERE guild_id=$1
+     LIMIT 1`,
+    [guildId]
+  );
+  return res.rows[0] || null;
+}
+
+async function saveVouchboardConfig(guildId, channelId, messageId, limitCount) {
+  await pool.query(
+    `INSERT INTO vouchboard (guild_id, channel_id, message_id, limit_count)
+     VALUES ($1,$2,$3,$4)
+     ON CONFLICT (guild_id) DO UPDATE
+       SET channel_id=EXCLUDED.channel_id,
+           message_id=EXCLUDED.message_id,
+           limit_count=EXCLUDED.limit_count,
+           updated_at=NOW()`,
+    [guildId, channelId, messageId, limitCount]
+  );
+}
+
+async function removeVouchboardConfig(guildId) {
+  await pool.query(`DELETE FROM vouchboard WHERE guild_id=$1`, [guildId]);
+}
+
+async function fetchTopVouches(guildId, limit = 10) {
+  const top = await pool.query(
+    `SELECT vouched_id, COUNT(*)::int AS count, AVG(rating)::float AS avg
+     FROM vouches
+     WHERE guild_id=$1
+     GROUP BY vouched_id
+     ORDER BY count DESC
+     LIMIT $2`,
+    [guildId, limit]
+  );
+  return top.rows;
+}
+
+function buildVouchboardEmbed(rows, limit) {
+  const desc = rows.length
+    ? rows
+        .map((r, i) => {
+          const avg = r.avg ? r.avg.toFixed(2) : "N/A";
+          return `**${i + 1}.** <@${r.vouched_id}> — **${r.count}** vouches — **${avg}/5**`;
+        })
+        .join("\n")
+    : "Aucun vouch pour le moment.";
+
+  return new EmbedBuilder()
+    .setTitle("🏆 Classement des vouchs")
+    .setDescription(desc)
+    .setFooter({
+      text: `Top ${limit} • Mise à jour toutes les ${Math.round(VOUCHBOARD_REFRESH_MS / 1000)}s`,
+    })
+    .setTimestamp();
+}
+
+async function updateVouchboardMessage(client, guildId) {
+  const cfg = await getVouchboardConfig(guildId);
+  if (!cfg) return; // pas configuré
+
+  const channel = await client.channels.fetch(cfg.channel_id).catch(() => null);
+  if (!channel || !channel.isTextBased()) return;
+
+  const limit = Math.max(3, Math.min(10, Number(cfg.limit_count) || 10));
+  const rows = await fetchTopVouches(guildId, limit);
+  const embed = buildVouchboardEmbed(rows, limit);
+
+  let msg = await channel.messages.fetch(cfg.message_id).catch(() => null);
+
+  // Si le message a été supprimé, on le recrée et on met à jour la config
+  if (!msg) {
+    msg = await channel.send({ embeds: [embed] });
+    await saveVouchboardConfig(guildId, channel.id, msg.id, limit);
+    return;
+  }
+
+  await msg.edit({ embeds: [embed] });
+}
+
+function startGlobalVouchboardUpdater(client) {
+  // Une boucle globale suffit (si un serveur n'a pas de board, updateVouchboardMessage return)
+  setInterval(async () => {
+    for (const g of client.guilds.cache.values()) {
+      updateVouchboardMessage(client, g.id).catch((e) =>
+        console.error("updateVouchboardMessage:", e)
+      );
+    }
+  }, VOUCHBOARD_REFRESH_MS);
+}
+
+/* -------------------------------
+   Bot lifecycle
+-------------------------------- */
+
 client.once("ready", async () => {
   console.log(`✅ Connecté en tant que ${client.user.tag}`);
   try {
     await initDb();
     await registerCommands();
+
+    // Update une première fois + lance la boucle 60s
+    for (const g of client.guilds.cache.values()) {
+      await updateVouchboardMessage(client, g.id).catch(() => {});
+    }
+    startGlobalVouchboardUpdater(client);
   } catch (err) {
     console.error("Erreur au démarrage:", err);
     process.exit(1);
@@ -126,23 +266,70 @@ client.once("ready", async () => {
 client.on("interactionCreate", async (interaction) => {
   if (!interaction.isChatInputCommand()) return;
 
-  // Optionnel : forcer un salon
-  if (VOUCH_CHANNEL_ID && interaction.commandName === "vouch") {
-    if (interaction.channelId !== VOUCH_CHANNEL_ID) {
-      return interaction.reply({
-        content: `⚠️ Les vouchs se font uniquement dans <#${VOUCH_CHANNEL_ID}>.`,
-        ephemeral: true,
-      });
-    }
-  }
-
+  // /ping
   if (interaction.commandName === "ping") {
     const sent = await interaction.reply({ content: "pong 🏓", fetchReply: true });
     const latency = sent.createdTimestamp - interaction.createdTimestamp;
     return interaction.editReply(`pong 🏓 (latence: ${latency}ms)`);
   }
 
+  // /setvouchboard
+  if (interaction.commandName === "setvouchboard") {
+    if (
+      !interaction.memberPermissions ||
+      !interaction.memberPermissions.has(PermissionsBitField.Flags.ManageGuild)
+    ) {
+      return interaction.reply({
+        content: "⛔ Il faut la permission **Gérer le serveur** pour faire ça.",
+        ephemeral: true,
+      });
+    }
+
+    const limit = interaction.options.getInteger("limit") ?? 10;
+    const rows = await fetchTopVouches(interaction.guildId, limit);
+    const embed = buildVouchboardEmbed(rows, limit);
+
+    const msg = await interaction.channel.send({ embeds: [embed] });
+
+    await saveVouchboardConfig(interaction.guildId, interaction.channelId, msg.id, limit);
+
+    return interaction.reply({
+      content: `✅ Vouchboard créé ici. Il sera mis à jour toutes les ${Math.round(
+        VOUCHBOARD_REFRESH_MS / 1000
+      )}s.`,
+      ephemeral: true,
+    });
+  }
+
+  // /removevouchboard
+  if (interaction.commandName === "removevouchboard") {
+    if (
+      !interaction.memberPermissions ||
+      !interaction.memberPermissions.has(PermissionsBitField.Flags.ManageGuild)
+    ) {
+      return interaction.reply({
+        content: "⛔ Il faut la permission **Gérer le serveur** pour faire ça.",
+        ephemeral: true,
+      });
+    }
+
+    await removeVouchboardConfig(interaction.guildId);
+    return interaction.reply({
+      content: "✅ Vouchboard désactivé (plus de mises à jour auto).",
+      ephemeral: true,
+    });
+  }
+
+  // /vouch
   if (interaction.commandName === "vouch") {
+    // Optionnel : forcer un salon
+    if (VOUCH_CHANNEL_ID && interaction.channelId !== VOUCH_CHANNEL_ID) {
+      return interaction.reply({
+        content: `⚠️ Les vouchs se font uniquement dans <#${VOUCH_CHANNEL_ID}>.`,
+        ephemeral: true,
+      });
+    }
+
     const target = interaction.options.getUser("membre", true);
     const note = interaction.options.getString("note", true).trim();
     const rating = interaction.options.getInteger("rating") ?? 5;
@@ -156,8 +343,8 @@ client.on("interactionCreate", async (interaction) => {
     if (target.id === interaction.user.id) {
       return interaction.reply({ content: "⚠️ Tu ne peux pas te vouch toi-même.", ephemeral: true });
     }
-    if (note.length < 5) {
-      return interaction.reply({ content: "⚠️ Ta note est trop courte (min 5 caractères).", ephemeral: true });
+    if (note.length < 3) {
+      return interaction.reply({ content: "⚠️ Ta note est trop courte (min 3 caractères).", ephemeral: true });
     }
 
     // Anti-spam : 1 vouch par personne -> même cible toutes les 24h
@@ -204,9 +391,13 @@ client.on("interactionCreate", async (interaction) => {
       )
       .setTimestamp();
 
+    // ✅ Optionnel mais utile : update du vouchboard tout de suite (sans attendre 60s)
+    updateVouchboardMessage(client, interaction.guildId).catch(() => {});
+
     return interaction.reply({ embeds: [embed] });
   }
 
+  // /vouches
   if (interaction.commandName === "vouches") {
     const target = interaction.options.getUser("membre", true);
 
@@ -249,6 +440,7 @@ client.on("interactionCreate", async (interaction) => {
     return interaction.reply({ embeds: [embed] });
   }
 
+  // /topvouches
   if (interaction.commandName === "topvouches") {
     const limit = interaction.options.getInteger("limit") ?? 5;
 
