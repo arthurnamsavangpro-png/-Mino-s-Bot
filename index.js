@@ -9,6 +9,7 @@ const { Pool } = require("pg");
 
 const { createVouchesService } = require("./vouches");
 const { createRankupService } = require("./rankup");
+const { createSendMessageService } = require("./send-message");
 
 const TOKEN = process.env.DISCORD_TOKEN;
 const CLIENT_ID = process.env.CLIENT_ID;
@@ -94,13 +95,13 @@ async function initDb() {
 }
 
 const client = new Client({
-  // GuildMembers utile pour gérer les rôles (active "Server Members Intent" dans le Dev Portal)
   intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMembers],
 });
 
 // Services
 const rankup = createRankupService({ pool, config });
 const vouches = createVouchesService({ pool, config, rankup });
+const sendMessage = createSendMessageService();
 
 async function registerCommands() {
   const commands = [
@@ -111,11 +112,13 @@ async function registerCommands() {
 
     // Rankup
     ...rankup.commands,
+
+    // Send message
+    ...sendMessage.commands,
   ].map((c) => c.toJSON());
 
   const rest = new REST({ version: "10" }).setToken(TOKEN);
 
-  // Enregistrement GUILD (instantané). Global peut prendre du temps.
   await rest.put(Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID), {
     body: commands,
   });
@@ -133,7 +136,6 @@ client.once("ready", async () => {
     await initDb();
     await registerCommands();
 
-    // Update une première fois + lance la boucle
     for (const g of client.guilds.cache.values()) {
       await vouches.updateVouchboardMessage(client, g.id).catch(() => {});
     }
@@ -147,12 +149,14 @@ client.once("ready", async () => {
 client.on("interactionCreate", async (interaction) => {
   if (!interaction.isChatInputCommand()) return;
 
-  // /ping
   if (interaction.commandName === "ping") {
     const sent = await interaction.reply({ content: "pong 🏓", fetchReply: true });
     const latency = sent.createdTimestamp - interaction.createdTimestamp;
     return interaction.editReply(`pong 🏓 (latence: ${latency}ms)`);
   }
+
+  // /send
+  if (await sendMessage.handleInteraction(interaction)) return;
 
   // Vouches module
   if (await vouches.handleInteraction(interaction, client)) return;
