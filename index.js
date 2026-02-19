@@ -4,6 +4,7 @@ const {
   REST,
   Routes,
   SlashCommandBuilder,
+  MessageFlags,
 } = require("discord.js");
 const { Pool } = require("pg");
 
@@ -108,10 +109,7 @@ async function registerCommands() {
   ].map((c) => c.toJSON());
 
   const rest = new REST({ version: "10" }).setToken(TOKEN);
-
-  await rest.put(Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID), {
-    body: commands,
-  });
+  await rest.put(Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID), { body: commands });
 
   console.log("✅ Slash commands enregistrées sur le serveur.");
 }
@@ -138,10 +136,10 @@ process.on("uncaughtException", (err) => console.error("uncaughtException:", err
 
 client.on("interactionCreate", async (interaction) => {
   try {
-    // IMPORTANT : en premier (gère aussi les MODALS)
+    // IMPORTANT: en premier (gère aussi les MODALS)
     if (await sendMessage.handleInteraction(interaction)) return;
 
-    // Le reste : slash uniquement
+    // Le reste: slash uniquement
     if (!interaction.isChatInputCommand()) return;
 
     if (interaction.commandName === "ping") {
@@ -155,10 +153,11 @@ client.on("interactionCreate", async (interaction) => {
   } catch (e) {
     console.error("interactionCreate fatal:", e);
 
-    // fallback anti-timeout
-    if (interaction && interaction.isRepliable && interaction.isRepliable()) {
+    if (interaction?.isRepliable?.()) {
       if (!interaction.deferred && !interaction.replied) {
-        await interaction.reply({ content: "⚠️ Erreur interne (voir logs).", ephemeral: true }).catch(() => {});
+        await interaction
+          .reply({ content: "⚠️ Erreur interne (voir logs).", flags: MessageFlags.Ephemeral })
+          .catch(() => {});
       } else if (interaction.deferred && !interaction.replied) {
         await interaction.editReply("⚠️ Erreur interne (voir logs).").catch(() => {});
       }
