@@ -16,6 +16,16 @@ const {
   MessageFlags,
 } = require("discord.js");
 
+/* ---------------- Presets ---------------- */
+
+// ✅ Catégories prédéfinies (panel mode: categories)
+const PRESET_CATEGORIES = [
+  { label: "Support", value: "support", description: "Aide / assistance" },
+  { label: "Vente de Brainrot", value: "vente-brainrot", description: "Achat / vente" },
+  { label: "Recrutement", value: "recrutement", description: "Candidature / staff" },
+  { label: "Questions", value: "questions", description: "Questions générales" },
+];
+
 /* ---------------- Utils ---------------- */
 
 function nowIso(ts) {
@@ -28,9 +38,7 @@ function clamp(n, min, max) {
 }
 
 function isAdmin(interaction) {
-  return Boolean(
-    interaction.memberPermissions?.has(PermissionsBitField.Flags.Administrator)
-  );
+  return Boolean(interaction.memberPermissions?.has(PermissionsBitField.Flags.Administrator));
 }
 
 function buildStars(n) {
@@ -57,6 +65,8 @@ function parseCategories(input) {
 
     let value = label
       .toLowerCase()
+      .normalize("NFKD")
+      .replace(/[\u0300-\u036f]/g, "")
       .replace(/[^a-z0-9-]/g, "-")
       .replace(/-+/g, "-")
       .replace(/^-|-$/g, "")
@@ -83,15 +93,29 @@ function parseCategories(input) {
   return out.length ? out : null;
 }
 
-// Réponses éphémères (fix warning: utiliser flags)
+/**
+ * Réponse éphémère robuste:
+ * - si interaction a deferReply -> editReply
+ * - si interaction a deferUpdate ou reply déjà fait -> followUp éphémère
+ */
 async function replyEphemeral(interaction, payload) {
-  const p = { ...payload, flags: MessageFlags.Ephemeral };
-  delete p.ephemeral;
+  const pReply = { ...payload, flags: MessageFlags.Ephemeral };
+  delete pReply.ephemeral;
+
+  const pEdit = { ...payload };
+  delete pEdit.ephemeral;
+  delete pEdit.flags;
 
   if (interaction.deferred || interaction.replied) {
-    return interaction.editReply(p).catch(() => {});
+    // editReply si possible, sinon followUp
+    try {
+      return await interaction.editReply(pEdit);
+    } catch {
+      return await interaction.followUp(pReply).catch(() => {});
+    }
   }
-  return interaction.reply(p).catch(() => {});
+
+  return await interaction.reply(pReply).catch(() => {});
 }
 
 async function safeDeferUpdate(interaction) {
@@ -115,9 +139,7 @@ async function fetchAllMessages(channel, maxMessages = 1000) {
   let before;
 
   while (all.length < maxMessages) {
-    const batch = await channel.messages
-      .fetch({ limit: 100, before })
-      .catch(() => null);
+    const batch = await channel.messages.fetch({ limit: 100, before }).catch(() => null);
     if (!batch || batch.size === 0) break;
 
     const arr = Array.from(batch.values());
@@ -162,9 +184,9 @@ function renderTranscript(channel, messages) {
   return header + lines.join("\n");
 }
 
-/* ---------------- Lock anti-concurrence (anti “ticket bloqué”) ---------------- */
+/* ---------------- Lock anti-concurrence (anti ticket bloqué) ---------------- */
 
-// Lock par ticket_id + auto-release en cas de souci (évite deadlock si une promesse reste bloquée)
+// Lock par ticket_id + auto-release en cas de souci (évite deadlock)
 const ticketLocks = new Map();
 
 async function acquireTicketLock(ticketId, timeoutMs = 15000) {
@@ -181,7 +203,6 @@ async function acquireTicketLock(ticketId, timeoutMs = 15000) {
   const promise = new Promise((res) => (resolvePromise = res));
 
   const timer = setTimeout(() => {
-    // auto-release (best effort)
     if (!released) {
       released = true;
       ticketLocks.delete(key);
@@ -195,7 +216,6 @@ async function acquireTicketLock(ticketId, timeoutMs = 15000) {
     if (released) return;
     released = true;
     clearTimeout(timer);
-    // delete seulement si c'est toujours notre lock
     const cur = ticketLocks.get(key);
     if (cur && cur.promise === promise) ticketLocks.delete(key);
     resolvePromise();
@@ -252,7 +272,7 @@ function buildTicketEmbed({ openerId, categoryLabel, ticketId, claimedBy }) {
     .setDescription(
       [
         `**Auteur :** <@${openerId}>`,
-        `**Catégorie :** ${categoryLabel || "Support"}`,
+        `**Raison :** ${categoryLabel || "Support"}`, // ✅ demandé: "Raison"
         `**Pris en charge :** ${priseEnCharge}`,
         ``,
         `Explique ton besoin ici. Un staff va te répondre.`,
@@ -295,8 +315,15 @@ function buildTicketControls(ticketId, isClaimed) {
 }
 
 async function updateTicketMessage(interaction, data) {
-  const msg = interaction.message;
-  if (!msg || !msg.edit) return;
+  const channel = interaction.channel;
+  const messageId = interaction.message?.id;
+
+  if (!channel?.isTextBased?.() || !messageId) return;
+
+  // ✅ plus robuste que interaction.message direct
+  const msg =
+    (await channel.messages.fetch(messageId).catch(() => null)) || interaction.message;
+  if (!msg?.edit) return;
 
   const embed = buildTicketEmbed(data);
   const controls = buildTicketControls(data.ticketId, Boolean(data.claimedBy));
@@ -321,7 +348,7 @@ function createTicketsService({ pool, config }) {
     .addStringOption((opt) =>
       opt
         .setName("mode")
-        .setDescription("Simple = bouton | Categories = menu")
+        .setDescription("simple = bouton | categories = menu")
         .setRequired(true)
         .addChoices(
           { name: "simple", value: "simple" },
@@ -342,11 +369,7 @@ function createTicketsService({ pool, config }) {
         )
     )
     .addStringOption((opt) =>
-      opt
-        .setName("titre")
-        .setDescription("Titre de l'embed")
-        .setRequired(false)
-        .setMaxLength(256)
+      opt.setName("titre").setDescription("Titre de l'embed").setRequired(false).setMaxLength(256)
     )
     .addStringOption((opt) =>
       opt
@@ -359,7 +382,7 @@ function createTicketsService({ pool, config }) {
       opt
         .setName("categories")
         .setDescription(
-          "Mode categories: ex: Support|Questions, Signalement|Report, Partenariat"
+          "Optionnel: remplace les catégories. Format: Support|Aide, Recrutement|Candidature"
         )
         .setRequired(false)
         .setMaxLength(1000)
@@ -368,9 +391,7 @@ function createTicketsService({ pool, config }) {
   const ticketConfigCmd = new SlashCommandBuilder()
     .setName("ticket-config")
     .setDescription("ADMIN: Configure le système de tickets")
-    .addSubcommand((sub) =>
-      sub.setName("show").setDescription("Affiche la configuration actuelle")
-    )
+    .addSubcommand((sub) => sub.setName("show").setDescription("Affiche la configuration actuelle"))
     .addSubcommand((sub) =>
       sub
         .setName("set")
@@ -383,10 +404,7 @@ function createTicketsService({ pool, config }) {
             .addChannelTypes(ChannelType.GuildCategory)
         )
         .addRoleOption((opt) =>
-          opt
-            .setName("staff_role")
-            .setDescription("Rôle staff (optionnel)")
-            .setRequired(false)
+          opt.setName("staff_role").setDescription("Rôle staff (optionnel)").setRequired(false)
         )
         .addChannelOption((opt) =>
           opt
@@ -419,16 +437,10 @@ function createTicketsService({ pool, config }) {
             .setMaxValue(1440)
         )
         .addBooleanOption((opt) =>
-          opt
-            .setName("claim_exclusive")
-            .setDescription("Claim exclusif")
-            .setRequired(false)
+          opt.setName("claim_exclusive").setDescription("Claim exclusif").setRequired(false)
         )
         .addBooleanOption((opt) =>
-          opt
-            .setName("delete_on_close")
-            .setDescription("Supprimer auto après close")
-            .setRequired(false)
+          opt.setName("delete_on_close").setDescription("Supprimer auto après close").setRequired(false)
         )
     );
 
@@ -473,16 +485,8 @@ function createTicketsService({ pool, config }) {
       if (row[k] !== null && row[k] !== undefined) merged[k] = row[k];
     }
 
-    merged.max_open_per_user = clamp(
-      Number(merged.max_open_per_user || 1),
-      1,
-      5
-    );
-    merged.cooldown_seconds = clamp(
-      Number(merged.cooldown_seconds || 0),
-      0,
-      86400
-    );
+    merged.max_open_per_user = clamp(Number(merged.max_open_per_user || 1), 1, 5);
+    merged.cooldown_seconds = clamp(Number(merged.cooldown_seconds || 0), 0, 86400);
 
     return merged;
   }
@@ -542,8 +546,7 @@ function createTicketsService({ pool, config }) {
       interaction.options.getString("description") ||
       "Clique pour créer un ticket. Un staff te répondra dès que possible.";
 
-    const targetChannel =
-      interaction.options.getChannel("salon") || interaction.channel;
+    const targetChannel = interaction.options.getChannel("salon") || interaction.channel;
 
     if (!targetChannel || !targetChannel.isTextBased?.()) {
       await replyEphemeral(interaction, { content: "⚠️ Salon invalide." });
@@ -554,13 +557,8 @@ function createTicketsService({ pool, config }) {
     let categories = null;
 
     if (mode === "categories") {
-      categories = parseCategories(interaction.options.getString("categories"));
-      if (!categories) {
-        categories = [
-          { label: "Support", value: "support", description: "Questions / aide" },
-          { label: "Signalement", value: "signalement", description: "Report / problème" },
-        ];
-      }
+      // ✅ si rien n'est fourni: on met les catégories prédéfinies
+      categories = parseCategories(interaction.options.getString("categories")) || PRESET_CATEGORIES;
     }
 
     const embed = new EmbedBuilder()
@@ -584,7 +582,7 @@ function createTicketsService({ pool, config }) {
         new ActionRowBuilder().addComponents(
           new StringSelectMenuBuilder()
             .setCustomId(`ticket:select:${panelId}`)
-            .setPlaceholder("Choisis une catégorie…")
+            .setPlaceholder("Choisis une raison…")
             .addOptions(
               categories.map((c) => ({
                 label: c.label,
@@ -613,9 +611,7 @@ function createTicketsService({ pool, config }) {
       ]
     );
 
-    await replyEphemeral(interaction, {
-      content: `✅ Panel posté dans <#${msg.channel.id}>.`,
-    });
+    await replyEphemeral(interaction, { content: `✅ Panel posté dans <#${msg.channel.id}>.` });
     return true;
   }
 
@@ -633,10 +629,7 @@ function createTicketsService({ pool, config }) {
     );
 
     if ((openRes.rows[0]?.c || 0) >= settings.max_open_per_user) {
-      return {
-        ok: false,
-        message: `⛔ Tu as déjà ${openRes.rows[0].c} ticket(s) ouvert(s).`,
-      };
+      return { ok: false, message: `⛔ Tu as déjà ${openRes.rows[0].c} ticket(s) ouvert(s).` };
     }
 
     const lastRes = await pool.query(
@@ -653,17 +646,14 @@ function createTicketsService({ pool, config }) {
       const diffSec = Math.floor((Date.now() - last) / 1000);
       if (diffSec < settings.cooldown_seconds) {
         const left = settings.cooldown_seconds - diffSec;
-        return {
-          ok: false,
-          message: `⏳ Cooldown: réessaie dans ${Math.ceil(left / 60)} min.`,
-        };
+        return { ok: false, message: `⏳ Cooldown: réessaie dans ${Math.ceil(left / 60)} min.` };
       }
     }
 
     return { ok: true };
   }
 
-  async function createTicket(interaction, categoryLabel) {
+  async function createTicket(interaction, reasonLabel) {
     const guild = interaction.guild;
     if (!guild) {
       await replyEphemeral(interaction, { content: "⚠️ Serveur introuvable." });
@@ -685,13 +675,15 @@ function createTicketsService({ pool, config }) {
     }
 
     const ticketId = crypto.randomUUID();
-    const catLabel = categoryLabel || "Support";
 
-    // Nom initial : 🟢 + 4 premiers pseudo créateur + catégorie
+    // ✅ Raison = label choisi dans le select
+    const reason = reasonLabel || "Support";
+
+    // Nom initial : 🟢 + 4 premiers pseudo créateur + raison
     const channelName = buildTicketChannelName({
       claimed: false,
       username: interaction.user.username,
-      categoryLabel: catLabel,
+      categoryLabel: reason,
     });
 
     const overwrites = [
@@ -756,15 +748,16 @@ function createTicketsService({ pool, config }) {
       return true;
     }
 
+    // DB: on garde category_label comme "raison"
     await pool.query(
       `INSERT INTO tickets (ticket_id, guild_id, channel_id, opener_id, category_label, status)
        VALUES ($1,$2,$3,$4,$5,'open')`,
-      [ticketId, guild.id, channel.id, interaction.user.id, catLabel]
+      [ticketId, guild.id, channel.id, interaction.user.id, reason]
     );
 
     const embed = buildTicketEmbed({
       openerId: interaction.user.id,
-      categoryLabel: catLabel,
+      categoryLabel: reason,
       ticketId,
       claimedBy: null,
     });
@@ -827,7 +820,7 @@ function createTicketsService({ pool, config }) {
     }
   }
 
-  /* ---------------- Actions (FIX: ack + lock + DB atomique + message public) ---------------- */
+  /* ---------------- Actions (ack + lock + DB atomique + message public) ---------------- */
 
   async function doClaim(interaction, ticketId) {
     const release = await acquireTicketLock(ticketId);
@@ -850,13 +843,9 @@ function createTicketsService({ pool, config }) {
       }
 
       const isAdm = isAdmin(interaction);
-
-      // --- DB atomique ---
-      // 1) non claim -> claim (si claimed_by IS NULL)
-      // 2) claim par moi -> unclaim (si claimed_by = moi)
-      // 3) claim par autre -> refuse (admin peut unclaim)
       let publicMsg = null;
 
+      // 1) non claim -> claim
       if (!ticket.claimed_by) {
         const upd = await pool.query(
           `UPDATE tickets
@@ -879,7 +868,9 @@ function createTicketsService({ pool, config }) {
         }
 
         publicMsg = `✅ Ticket pris en charge par <@${interaction.user.id}>.`;
-      } else if (ticket.claimed_by === interaction.user.id) {
+      }
+      // 2) claim par moi -> unclaim
+      else if (ticket.claimed_by === interaction.user.id) {
         const upd = await pool.query(
           `UPDATE tickets
              SET claimed_by=NULL
@@ -901,7 +892,9 @@ function createTicketsService({ pool, config }) {
         }
 
         publicMsg = `🟥 Ticket n'est plus pris en charge.`;
-      } else {
+      }
+      // 3) claim par autre -> refus (admin peut unclaim l'autre)
+      else {
         if (!isAdm) {
           await safeFollowUpEphemeral(interaction, {
             content: `⚠️ Déjà pris en charge par <@${ticket.claimed_by}>.`,
@@ -909,7 +902,6 @@ function createTicketsService({ pool, config }) {
           return true;
         }
 
-        // admin: unclaim n'importe qui
         const upd = await pool.query(
           `UPDATE tickets
              SET claimed_by=NULL
@@ -928,14 +920,13 @@ function createTicketsService({ pool, config }) {
         publicMsg = `🟥 Ticket n'est plus pris en charge (action admin).`;
       }
 
-      // état final
       const finalTicket = await getTicket(ticketId);
       if (!finalTicket) {
         await safeFollowUpEphemeral(interaction, { content: "⚠️ Ticket introuvable." });
         return true;
       }
 
-      // Update embed + boutons (best-effort)
+      // update embed + boutons
       await updateTicketMessage(interaction, {
         openerId: finalTicket.opener_id,
         categoryLabel: finalTicket.category_label || "Support",
@@ -943,11 +934,11 @@ function createTicketsService({ pool, config }) {
         claimedBy: finalTicket.claimed_by || null,
       });
 
-      // Claim exclusive perms (best-effort)
+      // claim exclusive perms (best effort)
       await applyClaimExclusive(interaction.channel, settings, finalTicket.claimed_by || null);
 
-      // Rename salon selon état final (best-effort)
-      const catLabel = finalTicket.category_label || "Support";
+      // rename salon (best effort)
+      const reason = finalTicket.category_label || "Support";
       if (interaction.channel) {
         if (finalTicket.claimed_by) {
           const uname =
@@ -955,29 +946,24 @@ function createTicketsService({ pool, config }) {
               ? interaction.user.username
               : await fetchUsernameSafe(interaction.client, finalTicket.claimed_by);
 
-          const name = buildTicketChannelName({
-            claimed: true,
-            username: uname,
-            categoryLabel: catLabel,
-          });
-          await tryRenameTicketChannel(interaction.channel, name);
+          await tryRenameTicketChannel(
+            interaction.channel,
+            buildTicketChannelName({ claimed: true, username: uname, categoryLabel: reason })
+          );
         } else {
           const openerUsername = await fetchUsernameSafe(interaction.client, finalTicket.opener_id);
-          const name = buildTicketChannelName({
-            claimed: false,
-            username: openerUsername,
-            categoryLabel: catLabel,
-          });
-          await tryRenameTicketChannel(interaction.channel, name);
+          await tryRenameTicketChannel(
+            interaction.channel,
+            buildTicketChannelName({ claimed: false, username: openerUsername, categoryLabel: reason })
+          );
         }
       }
 
-      // ✅ DEMANDE: afficher dans le ticket pour tout le monde
+      // ✅ Message visible par tous dans le ticket
       if (publicMsg) await safeChannelSend(interaction.channel, publicMsg);
 
       return true;
     } catch (e) {
-      // ne jamais laisser une exception casser les boutons
       await safeFollowUpEphemeral(interaction, { content: "⚠️ Erreur claim (voir logs)." });
       return true;
     } finally {
@@ -1002,43 +988,21 @@ function createTicketsService({ pool, config }) {
       .setTimestamp();
 
     const row = new ActionRowBuilder().addComponents(
-      new ButtonBuilder()
-        .setCustomId(`ticket:rate:${ticketId}:1`)
-        .setLabel("⭐ 1")
-        .setStyle(ButtonStyle.Secondary),
-      new ButtonBuilder()
-        .setCustomId(`ticket:rate:${ticketId}:2`)
-        .setLabel("⭐ 2")
-        .setStyle(ButtonStyle.Secondary),
-      new ButtonBuilder()
-        .setCustomId(`ticket:rate:${ticketId}:3`)
-        .setLabel("⭐ 3")
-        .setStyle(ButtonStyle.Secondary),
-      new ButtonBuilder()
-        .setCustomId(`ticket:rate:${ticketId}:4`)
-        .setLabel("⭐ 4")
-        .setStyle(ButtonStyle.Secondary),
-      new ButtonBuilder()
-        .setCustomId(`ticket:rate:${ticketId}:5`)
-        .setLabel("⭐ 5")
-        .setStyle(ButtonStyle.Primary)
+      new ButtonBuilder().setCustomId(`ticket:rate:${ticketId}:1`).setLabel("⭐ 1").setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder().setCustomId(`ticket:rate:${ticketId}:2`).setLabel("⭐ 2").setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder().setCustomId(`ticket:rate:${ticketId}:3`).setLabel("⭐ 3").setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder().setCustomId(`ticket:rate:${ticketId}:4`).setLabel("⭐ 4").setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder().setCustomId(`ticket:rate:${ticketId}:5`).setLabel("⭐ 5").setStyle(ButtonStyle.Primary)
     );
 
     if (opener) {
-      const dmOk = await opener
-        .send({ embeds: [embed], components: [row] })
-        .then(() => true)
-        .catch(() => false);
+      const dmOk = await opener.send({ embeds: [embed], components: [row] }).then(() => true).catch(() => false);
       if (dmOk) return;
     }
 
     if (interaction.channel?.isTextBased?.()) {
       await interaction.channel
-        .send({
-          content: `<@${ticketRow.opener_id}>`,
-          embeds: [embed],
-          components: [row],
-        })
+        .send({ content: `<@${ticketRow.opener_id}>`, embeds: [embed], components: [row] })
         .catch(() => {});
     }
   }
@@ -1069,7 +1033,6 @@ function createTicketsService({ pool, config }) {
         [ticketId]
       );
 
-      // verrouille l'auteur (best-effort)
       if (interaction.channel) {
         await interaction.channel.permissionOverwrites
           .edit(ticket.opener_id, { SendMessages: false, ViewChannel: true })
@@ -1111,16 +1074,8 @@ function createTicketsService({ pool, config }) {
               .addFields(
                 { name: "Ticket", value: `\`${ticketId}\`` },
                 { name: "Auteur", value: `<@${ticket.opener_id}>`, inline: true },
-                {
-                  name: "Traité par",
-                  value: ticket.claimed_by ? `<@${ticket.claimed_by}>` : "—",
-                  inline: true,
-                },
-                {
-                  name: "Catégorie",
-                  value: ticket.category_label || "Support",
-                  inline: true,
-                }
+                { name: "Pris en charge", value: ticket.claimed_by ? `<@${ticket.claimed_by}>` : "—", inline: true },
+                { name: "Raison", value: ticket.category_label || "Support", inline: true }
               )
               .setTimestamp();
 
@@ -1168,7 +1123,6 @@ function createTicketsService({ pool, config }) {
 
       await pool.query(`DELETE FROM tickets WHERE ticket_id=$1`, [ticketId]);
       await safeChannelSend(interaction.channel, `🗑️ Ticket supprimé par <@${interaction.user.id}>.`);
-
       return true;
     } catch {
       await safeFollowUpEphemeral(interaction, { content: "⚠️ Erreur delete (voir logs)." });
@@ -1237,20 +1191,15 @@ function createTicketsService({ pool, config }) {
         return true;
       }
 
-      const file = new AttachmentBuilder(Buffer.from(content, "utf8"), {
-        name: `ticket-${ticketId}.txt`,
-      });
+      const file = new AttachmentBuilder(Buffer.from(content, "utf8"), { name: `ticket-${ticketId}.txt` });
 
       const embed = new EmbedBuilder()
         .setTitle("📄 Transcript (manuel)")
         .addFields(
           { name: "Ticket", value: `\`${ticketId}\`` },
           { name: "Auteur", value: `<@${ticket.opener_id}>`, inline: true },
-          {
-            name: "Traité par",
-            value: ticket.claimed_by ? `<@${ticket.claimed_by}>` : "—",
-            inline: true,
-          }
+          { name: "Pris en charge", value: ticket.claimed_by ? `<@${ticket.claimed_by}>` : "—", inline: true },
+          { name: "Raison", value: ticket.category_label || "Support", inline: true }
         )
         .setTimestamp();
 
@@ -1269,10 +1218,11 @@ function createTicketsService({ pool, config }) {
   }
 
   async function upsertFeedbackLogMessage(ticketId, channelId, messageId) {
-    await pool.query(
-      `UPDATE ticket_feedback SET log_channel_id=$2, log_message_id=$3 WHERE ticket_id=$1`,
-      [ticketId, channelId, messageId]
-    );
+    await pool.query(`UPDATE ticket_feedback SET log_channel_id=$2, log_message_id=$3 WHERE ticket_id=$1`, [
+      ticketId,
+      channelId,
+      messageId,
+    ]);
   }
 
   // Rate button => show modal immédiatement
@@ -1352,21 +1302,15 @@ function createTicketsService({ pool, config }) {
             { name: "Ticket", value: `\`${ticketId}\`` },
             { name: "Note", value: `${buildStars(r)} (${r}/5)`, inline: true },
             { name: "Auteur", value: `<@${ticket.opener_id}>`, inline: true },
-            {
-              name: "Traité par",
-              value: ticket.claimed_by ? `<@${ticket.claimed_by}>` : "—",
-              inline: true,
-            },
-            { name: "Catégorie", value: ticket.category_label || "Support", inline: true },
+            { name: "Pris en charge", value: ticket.claimed_by ? `<@${ticket.claimed_by}>` : "—", inline: true },
+            { name: "Raison", value: ticket.category_label || "Support", inline: true },
             { name: "Commentaire", value: comment ? comment.slice(0, 1024) : "—" }
           )
           .setTimestamp();
 
         if (fb.log_channel_id && fb.log_message_id) {
           const ch = await guild.channels.fetch(fb.log_channel_id).catch(() => null);
-          const msg = ch?.isTextBased?.()
-            ? await ch.messages.fetch(fb.log_message_id).catch(() => null)
-            : null;
+          const msg = ch?.isTextBased?.() ? await ch.messages.fetch(fb.log_message_id).catch(() => null) : null;
 
           if (msg) {
             await msg.edit({ embeds: [embed] }).catch(() => {});
@@ -1438,11 +1382,7 @@ function createTicketsService({ pool, config }) {
         { name: "Période", value: `${days} jours`, inline: true },
         { name: "Tickets créés", value: `${t1.rows[0]?.total || 0}`, inline: true },
         { name: "Tickets fermés", value: `${t2.rows[0]?.total_closed || 0}`, inline: true },
-        {
-          name: "Feedbacks",
-          value: `${f1.rows[0]?.total_feedback || 0} • moyenne: **${avg}/5**`,
-          inline: false,
-        },
+        { name: "Feedbacks", value: `${f1.rows[0]?.total_feedback || 0} • moyenne: **${avg}/5**`, inline: false },
         { name: "Répartition", value: distLine || "—", inline: false }
       )
       .setTimestamp();
@@ -1458,9 +1398,7 @@ function createTicketsService({ pool, config }) {
     if (interaction.isModalSubmit()) {
       if (!interaction.customId.startsWith("ticket:comment:")) return false;
       const parts = interaction.customId.split(":");
-      const ticketId = parts[2];
-      const rating = parts[3];
-      return await doComment(interaction, client, ticketId, rating);
+      return await doComment(interaction, client, parts[2], parts[3]);
     }
 
     // SELECT MENU
@@ -1470,10 +1408,7 @@ function createTicketsService({ pool, config }) {
       const panelId = interaction.customId.split(":")[2];
       const value = interaction.values?.[0];
 
-      const p = await pool.query(
-        `SELECT categories FROM ticket_panels WHERE panel_id=$1 LIMIT 1`,
-        [panelId]
-      );
+      const p = await pool.query(`SELECT categories FROM ticket_panels WHERE panel_id=$1 LIMIT 1`, [panelId]);
       const cats = p.rows[0]?.categories || null;
 
       let label = null;
@@ -1484,7 +1419,8 @@ function createTicketsService({ pool, config }) {
       } catch {}
 
       await interaction.deferReply({ flags: MessageFlags.Ephemeral }).catch(() => {});
-      return await createTicket(interaction, label || value);
+      // ✅ label = "Support / Vente de Brainrot / Recrutement / Questions"
+      return await createTicket(interaction, label || value || "Support");
     }
 
     // BUTTONS
@@ -1500,11 +1436,11 @@ function createTicketsService({ pool, config }) {
       }
 
       if (action === "rate") {
-        // showModal = ack direct (ne pas deferUpdate)
+        // showModal = ack direct
         return await doRate(interaction, parts[2], parts[3]);
       }
 
-      // ✅ Fix principal: ACK immédiat (sinon "échec interaction" si DB/rename/permissions prennent du temps)
+      // ✅ ACK immédiat pour éviter "Échec de l'interaction"
       await safeDeferUpdate(interaction);
 
       if (action === "claim") return await doClaim(interaction, parts[2]);
@@ -1535,11 +1471,7 @@ function createTicketsService({ pool, config }) {
           .setTitle("⚙️ Ticket config (admin)")
           .addFields(
             { name: "Category", value: s.category_id ? `<#${s.category_id}>` : "—" },
-            {
-              name: "Staff role",
-              value: s.staff_role_id ? `<@&${s.staff_role_id}>` : "—",
-              inline: true,
-            },
+            { name: "Staff role", value: s.staff_role_id ? `<@&${s.staff_role_id}>` : "—", inline: true },
             {
               name: "Admin feedback channel",
               value: s.admin_feedback_channel_id ? `<#${s.admin_feedback_channel_id}>` : "—",
@@ -1578,19 +1510,15 @@ function createTicketsService({ pool, config }) {
         if (transcriptCh) patch.transcript_channel_id = transcriptCh.id;
         if (maxOpen !== null && maxOpen !== undefined) patch.max_open_per_user = maxOpen;
         if (cdMin !== null && cdMin !== undefined) patch.cooldown_seconds = cdMin * 60;
-        if (claimExclusive !== null && claimExclusive !== undefined)
-          patch.claim_exclusive = claimExclusive;
-        if (deleteOnClose !== null && deleteOnClose !== undefined)
-          patch.delete_on_close = deleteOnClose;
+        if (claimExclusive !== null && claimExclusive !== undefined) patch.claim_exclusive = claimExclusive;
+        if (deleteOnClose !== null && deleteOnClose !== undefined) patch.delete_on_close = deleteOnClose;
 
         const next = await upsertSettings(interaction.guildId, patch);
 
         await replyEphemeral(interaction, {
           content: `✅ Config mise à jour. (category: ${
             next.category_id ? `<#${next.category_id}>` : "—"
-          }, feedback: ${
-            next.admin_feedback_channel_id ? `<#${next.admin_feedback_channel_id}>` : "—"
-          })`,
+          }, feedback: ${next.admin_feedback_channel_id ? `<#${next.admin_feedback_channel_id}>` : "—"})`,
         });
 
         return true;
