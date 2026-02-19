@@ -34,9 +34,7 @@ if (!TOKEN || !CLIENT_ID || !GUILD_ID) {
 }
 
 if (!process.env.DATABASE_URL) {
-  console.error(
-    "DATABASE_URL manquant. Ajoute une DB PostgreSQL sur Railway (ou définis DATABASE_URL)."
-  );
+  console.error("DATABASE_URL manquant. Ajoute une DB PostgreSQL sur Railway (ou définis DATABASE_URL).");
   process.exit(1);
 }
 
@@ -71,7 +69,6 @@ async function initDb() {
     CREATE INDEX IF NOT EXISTS idx_vouches_guild_vouched ON vouches (guild_id, vouched_id);
     CREATE INDEX IF NOT EXISTS idx_vouches_guild_voucher_vouched ON vouches (guild_id, voucher_id, vouched_id);
 
-    -- Message “classement” qui s’actualise
     CREATE TABLE IF NOT EXISTS vouchboard (
       guild_id TEXT PRIMARY KEY,
       channel_id TEXT NOT NULL,
@@ -80,7 +77,6 @@ async function initDb() {
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
 
-    -- Rank roles (basés sur le nombre de vouches)
     CREATE TABLE IF NOT EXISTS rank_roles (
       guild_id TEXT NOT NULL,
       role_id TEXT NOT NULL,
@@ -106,14 +102,8 @@ const sendMessage = createSendMessageService();
 async function registerCommands() {
   const commands = [
     new SlashCommandBuilder().setName("ping").setDescription("Répond pong + latence"),
-
-    // Vouches
     ...vouches.commands,
-
-    // Rankup
     ...rankup.commands,
-
-    // Send message
     ...sendMessage.commands,
   ].map((c) => c.toJSON());
 
@@ -125,10 +115,6 @@ async function registerCommands() {
 
   console.log("✅ Slash commands enregistrées sur le serveur.");
 }
-
-/* -------------------------------
-   Bot lifecycle
--------------------------------- */
 
 client.once("ready", async () => {
   console.log(`✅ Connecté en tant que ${client.user.tag}`);
@@ -146,12 +132,16 @@ client.once("ready", async () => {
   }
 });
 
+// Logs globaux utiles
+process.on("unhandledRejection", (err) => console.error("unhandledRejection:", err));
+process.on("uncaughtException", (err) => console.error("uncaughtException:", err));
+
 client.on("interactionCreate", async (interaction) => {
   try {
-    // IMPORTANT: en premier (gère aussi les MODALS)
+    // IMPORTANT : en premier (gère aussi les MODALS)
     if (await sendMessage.handleInteraction(interaction)) return;
 
-    // le reste : slash uniquement
+    // Le reste : slash uniquement
     if (!interaction.isChatInputCommand()) return;
 
     if (interaction.commandName === "ping") {
@@ -165,15 +155,12 @@ client.on("interactionCreate", async (interaction) => {
   } catch (e) {
     console.error("interactionCreate fatal:", e);
 
-    // Fallback anti-timeout : si possible on répond quand même
-    if (interaction?.isRepliable?.()) {
+    // fallback anti-timeout
+    if (interaction && interaction.isRepliable && interaction.isRepliable()) {
       if (!interaction.deferred && !interaction.replied) {
-        await interaction.reply({
-          content: "⚠️ Une erreur interne est survenue (voir logs).",
-          ephemeral: true,
-        }).catch(() => {});
+        await interaction.reply({ content: "⚠️ Erreur interne (voir logs).", ephemeral: true }).catch(() => {});
       } else if (interaction.deferred && !interaction.replied) {
-        await interaction.editReply("⚠️ Une erreur interne est survenue (voir logs).").catch(() => {});
+        await interaction.editReply("⚠️ Erreur interne (voir logs).").catch(() => {});
       }
     }
   }
