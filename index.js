@@ -14,6 +14,7 @@ const { createVouchesService } = require("./vouches");
 const { createRankupService } = require("./rankup");
 const { createSendMessageService } = require("./send-message");
 const { createTicketsService } = require("./tickets");
+const { createGiveawayService } = require("./giveaway");
 
 const TOKEN = process.env.DISCORD_TOKEN;
 const CLIENT_ID = process.env.CLIENT_ID; // Application ID
@@ -34,17 +35,20 @@ const ADMIN_FEEDBACK_CHANNEL_ID = process.env.ADMIN_FEEDBACK_CHANNEL_ID || null;
 const TICKET_TRANSCRIPT_CHANNEL_ID = process.env.TICKET_TRANSCRIPT_CHANNEL_ID || null;
 const TICKET_MAX_OPEN_PER_USER = Number(process.env.TICKET_MAX_OPEN_PER_USER || 1);
 const TICKET_COOLDOWN_SECONDS = Number(process.env.TICKET_COOLDOWN_SECONDS || 600);
-const TICKET_CLAIM_EXCLUSIVE =
-  (process.env.TICKET_CLAIM_EXCLUSIVE || "false").toLowerCase() === "true";
-const TICKET_DELETE_ON_CLOSE =
-  (process.env.TICKET_DELETE_ON_CLOSE || "false").toLowerCase() === "true";
+const TICKET_CLAIM_EXCLUSIVE = (process.env.TICKET_CLAIM_EXCLUSIVE || "false").toLowerCase() === "true";
+const TICKET_DELETE_ON_CLOSE = (process.env.TICKET_DELETE_ON_CLOSE || "false").toLowerCase() === "true";
+
+// Giveaways
+const GIVEAWAY_SWEEP_MS = Number(process.env.GIVEAWAY_SWEEP_MS || 15000);
 
 if (!TOKEN || !CLIENT_ID || !GUILD_ID) {
-  console.error("Variables manquantes. Ajoute DISCORD_TOKEN, CLIENT_ID, GUILD_ID.");
+  console.error("Variables manquantes.\nAjoute DISCORD_TOKEN, CLIENT_ID, GUILD_ID.");
   process.exit(1);
 }
 if (!process.env.DATABASE_URL) {
-  console.error("DATABASE_URL manquant. Ajoute une DB PostgreSQL (Railway) ou définis DATABASE_URL.");
+  console.error(
+    "DATABASE_URL manquant.\nAjoute une DB PostgreSQL (Railway) ou définis DATABASE_URL."
+  );
   process.exit(1);
 }
 
@@ -52,8 +56,12 @@ const config = {
   TOKEN,
   CLIENT_ID,
   GUILD_ID,
+
+  // vouches
   VOUCH_CHANNEL_ID,
   VOUCHBOARD_REFRESH_MS,
+
+  // rankup
   RANKUP_STACK,
   RANKUP_LOG_CHANNEL_ID,
 
@@ -66,6 +74,9 @@ const config = {
   TICKET_COOLDOWN_SECONDS,
   TICKET_CLAIM_EXCLUSIVE,
   TICKET_DELETE_ON_CLOSE,
+
+  // giveaways
+  GIVEAWAY_SWEEP_MS,
 };
 
 // Railway/Postgres : SSL souvent nécessaire en prod
@@ -107,7 +118,7 @@ async function initDb() {
     );
     CREATE INDEX IF NOT EXISTS idx_rank_roles_guild_required ON rank_roles (guild_id, required_vouches);
 
-    /* --- tickets (solution 3) --- */
+    /* --- tickets --- */
     CREATE TABLE IF NOT EXISTS ticket_settings (
       guild_id TEXT PRIMARY KEY,
       category_id TEXT,
@@ -166,9 +177,37 @@ async function initDb() {
       content TEXT NOT NULL,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
+
+    /* --- giveaways --- */
+    CREATE TABLE IF NOT EXISTS giveaways (
+      giveaway_id TEXT PRIMARY KEY,
+      guild_id TEXT NOT NULL,
+      channel_id TEXT NOT NULL,
+      message_id TEXT NOT NULL,
+      prize TEXT NOT NULL,
+      host_id TEXT NOT NULL,
+      winner_count INTEGER NOT NULL DEFAULT 1,
+      end_at TIMESTAMPTZ NOT NULL,
+      status TEXT NOT NULL DEFAULT 'running', /* running|ended|cancelled */
+      requirements JSONB NOT NULL DEFAULT '{}'::jsonb,
+      winners JSONB NOT NULL DEFAULT '[]'::jsonb,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      ended_at TIMESTAMPTZ
+    );
+    CREATE INDEX IF NOT EXISTS idx_giveaways_guild_status_endat ON giveaways (guild_id, status, end_at);
+
+    CREATE TABLE IF NOT EXISTS giveaway_entries (
+      giveaway_id TEXT NOT NULL REFERENCES giveaways(giveaway_id) ON DELETE CASCADE,
+      guild_id TEXT NOT NULL,
+      user_id TEXT NOT NULL,
+      entries INTEGER NOT NULL DEFAULT 1,
+      joined_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      PRIMARY KEY (giveaway_id, user_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_giveaway_entries_guild_user ON giveaway_entries (guild_id, user_id);
   `);
 
-  console.log("✅ DB prête (vouches + rank_roles + tickets OK).");
+  console.log("✅ DB prête (vouches + rank_roles + tickets + giveaways OK).");
 }
 
 const client = new Client({
@@ -180,6 +219,7 @@ const rankup = createRankupService({ pool, config });
 const vouches = createVouchesService({ pool, config, rankup });
 const sendMessage = createSendMessageService();
 const tickets = createTicketsService({ pool, config });
+const giveaways = createGiveawayService({ pool, config });
 
 async function registerCommands() {
   const commands = [
@@ -188,26 +228,28 @@ async function registerCommands() {
     ...rankup.commands,
     ...sendMessage.commands,
     ...tickets.commands,
+    ...giveaways.commands,
   ].map((c) => c.toJSON());
 
   const rest = new REST({ version: "10" }).setToken(TOKEN);
-  await rest.put(Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID), {
-    body: commands,
-  });
+  await rest.put(Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID), { body: commands });
   console.log("✅ Slash commands enregistrées sur le serveur.");
 }
 
 client.once("ready", async () => {
   console.log(`✅ Connecté en tant que ${client.user.tag}`);
-
   try {
     await initDb();
     await registerCommands();
 
+    // vouchboard refresh + init
     for (const g of client.guilds.cache.values()) {
       await vouches.updateVouchboardMessage(client, g.id).catch(() => {});
     }
     vouches.startGlobalVouchboardUpdater(client);
+
+    // giveaways sweeper
+    giveaways.startGlobalGiveawaySweeper(client);
   } catch (err) {
     console.error("Erreur au démarrage:", err);
     process.exit(1);
@@ -226,6 +268,9 @@ client.on("interactionCreate", async (interaction) => {
     // Send-message ensuite (gère aussi ses modals)
     if (await sendMessage.handleInteraction(interaction)) return;
 
+    // Giveaways (boutons + slash)
+    if (await giveaways.handleInteraction(interaction, client)) return;
+
     // Le reste: slash uniquement
     if (!interaction.isChatInputCommand()) return;
 
@@ -239,7 +284,6 @@ client.on("interactionCreate", async (interaction) => {
     if (await rankup.handleInteraction(interaction)) return;
   } catch (e) {
     console.error("interactionCreate fatal:", e);
-
     if (interaction?.isRepliable?.()) {
       if (!interaction.deferred && !interaction.replied) {
         await interaction
