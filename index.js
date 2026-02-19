@@ -394,7 +394,7 @@ client.on("interactionCreate", async (interaction) => {
     // ✅ Optionnel mais utile : update du vouchboard tout de suite (sans attendre 60s)
     updateVouchboardMessage(client, interaction.guildId).catch(() => {});
 
-    return interaction.reply({ embeds: [embed] });
+    return interaction.reply({ embeds: [embed], ephemeral: true });
   }
 
   // /vouches
