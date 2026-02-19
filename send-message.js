@@ -63,6 +63,7 @@ function createSendMessageService() {
 
   /* -------------------------------
      /sendembed (modal)
+     IMPORTANT: on ouvre le modal immédiatement (pas de fetch avant)
   -------------------------------- */
   const sendEmbedCmd = new SlashCommandBuilder()
     .setName("sendembed")
@@ -118,18 +119,6 @@ function createSendMessageService() {
     return null;
   }
 
-  async function getTargetChannel(interaction, explicitChannel, replyParsed) {
-    let target = explicitChannel || interaction.channel;
-
-    // Si reply lien => déduire le salon si aucun salon explicite
-    if (!explicitChannel && replyParsed?.channelId) {
-      const ch = await interaction.guild.channels.fetch(replyParsed.channelId).catch(() => null);
-      if (ch && ch.isTextBased()) target = ch;
-    }
-
-    return target;
-  }
-
   async function ensureBotCanSend(interaction, targetChannel) {
     const me = await interaction.guild.members.fetchMe().catch(() => null);
     const perms = targetChannel.permissionsFor(me);
@@ -143,16 +132,13 @@ function createSendMessageService() {
     return Boolean(canSend);
   }
 
-  async function resolveReply(interaction, targetChannel, replyParsed, explicitChannel) {
-    if (!replyParsed?.messageId) return null;
+  async function resolveReply(targetChannel, replyMsgId) {
+    if (!replyMsgId || replyMsgId === "0") return { reply: undefined };
 
-    if (explicitChannel && replyParsed?.channelId && explicitChannel.id !== replyParsed.channelId) {
-      return { error: "⚠️ Le message à reply n’est pas dans le salon choisi. Mets le bon salon, ou enlève `salon:`." };
+    const msg = await targetChannel.messages.fetch(replyMsgId).catch(() => null);
+    if (!msg) {
+      return { error: "⚠️ Message `reply_to` introuvable (mauvais ID/lien, ou pas accessible)." };
     }
-
-    const msg = await targetChannel.messages.fetch(replyParsed.messageId).catch(() => null);
-    if (!msg) return { error: "⚠️ Message `reply_to` introuvable (mauvais ID/lien, ou pas accessible)." };
-
     return { reply: { messageReference: msg.id, failIfNotExists: false } };
   }
 
@@ -164,59 +150,78 @@ function createSendMessageService() {
     if (interaction.isModalSubmit()) {
       if (!interaction.customId.startsWith("sendembed|")) return false;
 
+      // ACK immédiat pour éviter "l'application ne répond plus"
+      await interaction.deferReply({ ephemeral: true }).catch(() => {});
+
       if (!interaction.guild) {
-        await interaction.reply({ content: "⚠️ Serveur introuvable.", ephemeral: true });
+        await interaction.editReply("⚠️ Serveur introuvable.").catch(() => {});
         return true;
       }
       if (!mustBeMod(interaction)) {
-        await interaction.reply({
-          content: "⛔ Il faut la permission **Gérer les messages**.",
-          ephemeral: true,
-        });
+        await interaction.editReply("⛔ Il faut la permission **Gérer les messages**.").catch(() => {});
         return true;
       }
 
-      // customId: sendembed|channelId|mentions|replyMsgId
-      const [, channelId, mentionsFlag, replyMsgId] = interaction.customId.split("|");
-      const allowMentions = mentionsFlag === "1";
+      // customId: sendembed|channelId|mentionsFlag|replyChannelId|replyMsgId
+      const parts = interaction.customId.split("|");
+      const channelId = parts[1] || "0";
+      const mentionsFlag = parts[2] || "0";
+      const replyChannelId = parts[3] || "0";
+      const replyMsgId = parts[4] || "0";
 
-      const targetChannel =
-        (channelId && channelId !== "0"
+      const allowMentions = mentionsFlag === "1";
+      const allowedMentions = allowMentions ? { parse: ["users", "roles"] } : { parse: [] };
+
+      // Choix du salon:
+      // - si salon fourni via /sendembed -> channelId
+      // - sinon si reply link avait un salon -> replyChannelId
+      // - sinon -> salon courant
+      let targetChannel =
+        (channelId !== "0"
           ? await interaction.guild.channels.fetch(channelId).catch(() => null)
-          : interaction.channel) || interaction.channel;
+          : null) ||
+        (replyChannelId !== "0"
+          ? await interaction.guild.channels.fetch(replyChannelId).catch(() => null)
+          : null) ||
+        interaction.channel;
 
       if (!targetChannel || !targetChannel.isTextBased()) {
-        await interaction.reply({ content: "⚠️ Salon invalide.", ephemeral: true });
+        await interaction.editReply("⚠️ Salon invalide (il doit être textuel).").catch(() => {});
+        return true;
+      }
+
+      // Si l'utilisateur a choisi un salon MAIS reply link est d'un autre salon => on refuse (reply cross-channel impossible)
+      if (channelId !== "0" && replyChannelId !== "0" && channelId !== replyChannelId) {
+        await interaction.editReply(
+          "⚠️ Le message à reply n’est pas dans le salon choisi. Mets le bon salon, ou enlève `salon:`."
+        ).catch(() => {});
         return true;
       }
 
       const canSend = await ensureBotCanSend(interaction, targetChannel);
       if (!canSend) {
-        await interaction.reply({
-          content: "⚠️ Je n’ai pas la permission d’envoyer des messages dans ce salon.",
-          ephemeral: true,
-        });
+        await interaction.editReply(
+          "⚠️ Je n’ai pas la permission d’envoyer des messages dans ce salon."
+        ).catch(() => {});
         return true;
       }
-
-      const allowedMentions = allowMentions ? { parse: ["users", "roles"] } : { parse: [] };
 
       const messageContent = interaction.fields.getTextInputValue("msg_content")?.trim() || "";
       const embedTitle = interaction.fields.getTextInputValue("embed_title")?.trim() || "";
       const embedDesc = interaction.fields.getTextInputValue("embed_desc")?.trim() || "";
 
       if (!embedDesc) {
-        await interaction.reply({ content: "⚠️ La description de l’embed est obligatoire.", ephemeral: true });
+        await interaction.editReply("⚠️ La description de l’embed est obligatoire.").catch(() => {});
         return true;
       }
 
       const eb = new EmbedBuilder().setDescription(embedDesc).setTimestamp();
       if (embedTitle) eb.setTitle(embedTitle);
 
-      let reply = undefined;
-      if (replyMsgId && replyMsgId !== "0") {
-        const msg = await targetChannel.messages.fetch(replyMsgId).catch(() => null);
-        if (msg) reply = { messageReference: msg.id, failIfNotExists: false };
+      const replyRes = await resolveReply(targetChannel, replyMsgId);
+      if (replyRes?.error) {
+        await interaction.editReply(replyRes.error).catch(() => {});
+        return true;
       }
 
       try {
@@ -224,16 +229,13 @@ function createSendMessageService() {
           content: messageContent || undefined,
           embeds: [eb],
           allowedMentions,
-          reply,
+          reply: replyRes.reply,
         });
 
-        await interaction.reply({
-          content: `✅ Embed envoyé dans ${targetChannel}.`,
-          ephemeral: true,
-        });
+        await interaction.editReply(`✅ Embed envoyé dans ${targetChannel}.`).catch(() => {});
       } catch (e) {
         console.error("sendembed modal error:", e);
-        await interaction.reply({ content: "⚠️ Impossible d’envoyer (erreur).", ephemeral: true });
+        await interaction.editReply("⚠️ Impossible d’envoyer (erreur).").catch(() => {});
       }
 
       return true;
@@ -247,7 +249,10 @@ function createSendMessageService() {
     if (!isSend && !isSendEmbed) return false;
 
     if (!interaction.guild) {
-      await interaction.reply({ content: "⚠️ Cette commande fonctionne uniquement dans un serveur.", ephemeral: true });
+      await interaction.reply({
+        content: "⚠️ Cette commande fonctionne uniquement dans un serveur.",
+        ephemeral: true,
+      });
       return true;
     }
 
@@ -259,77 +264,21 @@ function createSendMessageService() {
       return true;
     }
 
-    const explicitChannel = interaction.options.getChannel("salon") || null;
-    const replyRaw = interaction.options.getString("reply_to") || null;
-    const replyParsed = parseMessageLinkOrId(replyRaw);
-    const allowMentions = interaction.options.getBoolean("mentions") ?? false;
-
-    const targetChannel = await getTargetChannel(interaction, explicitChannel, replyParsed);
-    if (!targetChannel || !targetChannel.isTextBased()) {
-      await interaction.reply({ content: "⚠️ Salon invalide (il doit être textuel).", ephemeral: true });
-      return true;
-    }
-
-    const canSend = await ensureBotCanSend(interaction, targetChannel);
-    if (!canSend) {
-      await interaction.reply({
-        content:
-          "⚠️ Je n’ai pas la permission **Voir le salon** et/ou **Envoyer des messages** (ou **Envoyer dans les threads**) ici.",
-        ephemeral: true,
-      });
-      return true;
-    }
-
-    const allowedMentions = allowMentions ? { parse: ["users", "roles"] } : { parse: [] };
-
-    // Reply (pour /send uniquement ici — /sendembed gère ça via customId aussi)
-    const replyRes = await resolveReply(interaction, targetChannel, replyParsed, explicitChannel);
-    if (replyRes?.error) {
-      await interaction.reply({ content: replyRes.error, ephemeral: true });
-      return true;
-    }
-    const reply = replyRes?.reply;
-
-    /* ---------- /send ---------- */
-    if (isSend) {
-      const message = interaction.options.getString("message", true);
-
-      const attachment = interaction.options.getAttachment("file");
-      const files = attachment
-        ? [{ attachment: attachment.url, name: attachment.name || "file" }]
-        : undefined;
-
-      try {
-        await targetChannel.send({
-          content: message,
-          files,
-          allowedMentions,
-          reply,
-        });
-
-        await interaction.reply({
-          content: `✅ Message envoyé dans ${targetChannel}${reply ? " (en réponse)" : ""}${files ? " + fichier" : ""}.`,
-          ephemeral: true,
-        });
-      } catch (e) {
-        console.error("send error:", e);
-        await interaction.reply({ content: "⚠️ Impossible d’envoyer (erreur).", ephemeral: true });
-      }
-
-      return true;
-    }
-
-    /* ---------- /sendembed (ouvre le MODAL) ---------- */
+    /* ---------- /sendembed : ouvre le MODAL immédiatement ---------- */
     if (isSendEmbed) {
-      // On encode juste ce qu’on peut dans customId (limite 100 chars)
+      const explicitChannel = interaction.options.getChannel("salon") || null;
+      const allowMentions = interaction.options.getBoolean("mentions") ?? false;
+
+      const replyRaw = interaction.options.getString("reply_to") || null;
+      const parsed = parseMessageLinkOrId(replyRaw);
+
       const channelId = explicitChannel?.id || "0";
       const mentionsFlag = allowMentions ? "1" : "0";
-
-      // reply message id (si lien cross-channel on a déjà résolu plus haut)
-      const replyMsgId = replyParsed?.messageId || "0";
+      const replyChId = parsed?.channelId || "0";
+      const replyMsgId = parsed?.messageId || "0";
 
       const modal = new ModalBuilder()
-        .setCustomId(`sendembed|${channelId}|${mentionsFlag}|${replyMsgId}`)
+        .setCustomId(`sendembed|${channelId}|${mentionsFlag}|${replyChId}|${replyMsgId}`)
         .setTitle("Envoyer un message");
 
       const inputContent = new TextInputBuilder()
@@ -363,6 +312,78 @@ function createSendMessageService() {
       );
 
       await interaction.showModal(modal);
+      return true;
+    }
+
+    /* ---------- /send (texte) ---------- */
+    if (isSend) {
+      await interaction.deferReply({ ephemeral: true }).catch(() => {});
+
+      const message = interaction.options.getString("message", true);
+      const explicitChannel = interaction.options.getChannel("salon") || null;
+
+      const replyRaw = interaction.options.getString("reply_to") || null;
+      const replyParsed = parseMessageLinkOrId(replyRaw);
+
+      const allowMentions = interaction.options.getBoolean("mentions") ?? false;
+      const allowedMentions = allowMentions ? { parse: ["users", "roles"] } : { parse: [] };
+
+      // Choix salon (si reply link et pas de salon explicite -> on en déduit le salon)
+      let targetChannel =
+        explicitChannel ||
+        (replyParsed?.channelId
+          ? await interaction.guild.channels.fetch(replyParsed.channelId).catch(() => null)
+          : null) ||
+        interaction.channel;
+
+      if (!targetChannel || !targetChannel.isTextBased()) {
+        await interaction.editReply("⚠️ Salon invalide (il doit être textuel).").catch(() => {});
+        return true;
+      }
+
+      // Si salon explicite et reply link d'un autre salon => refuse (reply cross-channel impossible)
+      if (explicitChannel && replyParsed?.channelId && explicitChannel.id !== replyParsed.channelId) {
+        await interaction.editReply(
+          "⚠️ Le message à reply n’est pas dans le salon choisi. Mets le bon salon, ou enlève `salon:`."
+        ).catch(() => {});
+        return true;
+      }
+
+      const canSend = await ensureBotCanSend(interaction, targetChannel);
+      if (!canSend) {
+        await interaction.editReply(
+          "⚠️ Je n’ai pas la permission d’envoyer des messages dans ce salon."
+        ).catch(() => {});
+        return true;
+      }
+
+      const attachment = interaction.options.getAttachment("file");
+      const files = attachment
+        ? [{ attachment: attachment.url, name: attachment.name || "file" }]
+        : undefined;
+
+      const replyRes = await resolveReply(targetChannel, replyParsed?.messageId || "0");
+      if (replyRes?.error) {
+        await interaction.editReply(replyRes.error).catch(() => {});
+        return true;
+      }
+
+      try {
+        await targetChannel.send({
+          content: message,
+          files,
+          allowedMentions,
+          reply: replyRes.reply,
+        });
+
+        await interaction.editReply(
+          `✅ Message envoyé dans ${targetChannel}${replyRes.reply ? " (en réponse)" : ""}${files ? " + fichier" : ""}.`
+        ).catch(() => {});
+      } catch (e) {
+        console.error("send error:", e);
+        await interaction.editReply("⚠️ Impossible d’envoyer (erreur).").catch(() => {});
+      }
+
       return true;
     }
 
