@@ -15,6 +15,7 @@ const { createRankupService } = require("./rankup");
 const { createSendMessageService } = require("./send-message");
 const { createTicketsService } = require("./tickets");
 const { createGiveawayService } = require("./giveaway");
+const { createModerationService } = require("./moderation");
 
 const TOKEN = process.env.DISCORD_TOKEN;
 const CLIENT_ID = process.env.CLIENT_ID; // Application ID
@@ -35,11 +36,17 @@ const ADMIN_FEEDBACK_CHANNEL_ID = process.env.ADMIN_FEEDBACK_CHANNEL_ID || null;
 const TICKET_TRANSCRIPT_CHANNEL_ID = process.env.TICKET_TRANSCRIPT_CHANNEL_ID || null;
 const TICKET_MAX_OPEN_PER_USER = Number(process.env.TICKET_MAX_OPEN_PER_USER || 1);
 const TICKET_COOLDOWN_SECONDS = Number(process.env.TICKET_COOLDOWN_SECONDS || 600);
-const TICKET_CLAIM_EXCLUSIVE = (process.env.TICKET_CLAIM_EXCLUSIVE || "false").toLowerCase() === "true";
-const TICKET_DELETE_ON_CLOSE = (process.env.TICKET_DELETE_ON_CLOSE || "false").toLowerCase() === "true";
+const TICKET_CLAIM_EXCLUSIVE =
+  (process.env.TICKET_CLAIM_EXCLUSIVE || "false").toLowerCase() === "true";
+const TICKET_DELETE_ON_CLOSE =
+  (process.env.TICKET_DELETE_ON_CLOSE || "false").toLowerCase() === "true";
 
 // Giveaways
 const GIVEAWAY_SWEEP_MS = Number(process.env.GIVEAWAY_SWEEP_MS || 15000);
+
+// Moderation (fallback ENV, mais tu peux config via /log)
+const MODLOG_CHANNEL_ID = process.env.MODLOG_CHANNEL_ID || null;
+const MOD_STAFF_ROLE_ID = process.env.MOD_STAFF_ROLE_ID || null;
 
 if (!TOKEN || !CLIENT_ID || !GUILD_ID) {
   console.error("Variables manquantes.\nAjoute DISCORD_TOKEN, CLIENT_ID, GUILD_ID.");
@@ -77,6 +84,10 @@ const config = {
 
   // giveaways
   GIVEAWAY_SWEEP_MS,
+
+  // moderation
+  MODLOG_CHANNEL_ID,
+  MOD_STAFF_ROLE_ID,
 };
 
 // Railway/Postgres : SSL souvent nécessaire en prod
@@ -205,13 +216,52 @@ async function initDb() {
       PRIMARY KEY (giveaway_id, user_id)
     );
     CREATE INDEX IF NOT EXISTS idx_giveaway_entries_guild_user ON giveaway_entries (guild_id, user_id);
+
+    /* --- moderation --- */
+    CREATE TABLE IF NOT EXISTS mod_settings (
+      guild_id TEXT PRIMARY KEY,
+      modlog_channel_id TEXT,
+      staff_role_id TEXT,
+      log_events JSONB NOT NULL DEFAULT '{}'::jsonb,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+
+    CREATE TABLE IF NOT EXISTS mod_case_counters (
+      guild_id TEXT PRIMARY KEY,
+      last_case BIGINT NOT NULL DEFAULT 0
+    );
+
+    CREATE TABLE IF NOT EXISTS mod_cases (
+      guild_id TEXT NOT NULL,
+      case_id BIGINT NOT NULL,
+      action TEXT NOT NULL,
+      target_id TEXT,
+      target_tag TEXT,
+      moderator_id TEXT,
+      moderator_tag TEXT,
+      reason TEXT,
+      duration_ms BIGINT,
+      metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+      log_channel_id TEXT,
+      log_message_id TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      PRIMARY KEY (guild_id, case_id)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_mod_cases_guild_target_created ON mod_cases (guild_id, target_id, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_mod_cases_guild_created ON mod_cases (guild_id, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_mod_cases_guild_action_created ON mod_cases (guild_id, action, created_at DESC);
   `);
 
-  console.log("✅ DB prête (vouches + rank_roles + tickets + giveaways OK).");
+  console.log("✅ DB prête (vouches + rank_roles + tickets + giveaways + moderation OK)." );
 }
 
 const client = new Client({
-  intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMembers],
+  intents: [
+    GatewayIntentBits.Guilds,
+    GatewayIntentBits.GuildMembers,
+    GatewayIntentBits.GuildMessages, // utile pour purge (fetch/bulkDelete)
+  ],
 });
 
 // Services
@@ -220,6 +270,7 @@ const vouches = createVouchesService({ pool, config, rankup });
 const sendMessage = createSendMessageService();
 const tickets = createTicketsService({ pool, config });
 const giveaways = createGiveawayService({ pool, config });
+const moderation = createModerationService({ pool, config });
 
 async function registerCommands() {
   const commands = [
@@ -229,6 +280,7 @@ async function registerCommands() {
     ...sendMessage.commands,
     ...tickets.commands,
     ...giveaways.commands,
+    ...moderation.commands,
   ].map((c) => c.toJSON());
 
   const rest = new REST({ version: "10" }).setToken(TOKEN);
@@ -282,6 +334,7 @@ client.on("interactionCreate", async (interaction) => {
 
     if (await vouches.handleInteraction(interaction, client)) return;
     if (await rankup.handleInteraction(interaction)) return;
+    if (await moderation.handleInteraction(interaction, client)) return;
   } catch (e) {
     console.error("interactionCreate fatal:", e);
     if (interaction?.isRepliable?.()) {
