@@ -147,6 +147,10 @@ client.once("ready", async () => {
 });
 
 client.on("interactionCreate", async (interaction) => {
+  // IMPORTANT: handle en premier send-message (car gère aussi les MODALS)
+  if (await sendMessage.handleInteraction(interaction)) return;
+
+  // Le reste ne traite que les slash commands
   if (!interaction.isChatInputCommand()) return;
 
   if (interaction.commandName === "ping") {
@@ -154,9 +158,6 @@ client.on("interactionCreate", async (interaction) => {
     const latency = sent.createdTimestamp - interaction.createdTimestamp;
     return interaction.editReply(`pong 🏓 (latence: ${latency}ms)`);
   }
-
-  // /send
-  if (await sendMessage.handleInteraction(interaction)) return;
 
   // Vouches module
   if (await vouches.handleInteraction(interaction, client)) return;
