@@ -7,7 +7,6 @@ const {
   SlashCommandBuilder,
   MessageFlags,
 } = require("discord.js");
-
 const { Pool } = require("pg");
 
 const { createVouchesService } = require("./vouches");
@@ -17,19 +16,37 @@ const { createTicketsService } = require("./tickets");
 const { createGiveawayService } = require("./giveaway");
 const { createModerationService } = require("./moderation");
 
+/* -----------------------------
+  ENV
+------------------------------ */
 const TOKEN = process.env.DISCORD_TOKEN;
-const CLIENT_ID = process.env.CLIENT_ID; // Application ID
-const GUILD_ID = process.env.GUILD_ID; // ID du serveur (enregistrement rapide des slash commands)
+const CLIENT_ID = process.env.CLIENT_ID;
 
-// Vouches
+// Dev only (optionnel) : si tu veux push les commandes vite sur 1 serveur
+const GUILD_ID = process.env.GUILD_ID || null;
+
+// Déploiement commandes:
+// - "global" (recommandé multi-serveur) => commandes pour tous les serveurs
+// - "guild" => commandes uniquement sur GUILD_ID (dev rapide)
+// - "both" => global + guild
+const COMMANDS_SCOPE = (process.env.COMMANDS_SCOPE || (GUILD_ID ? "guild" : "global")).toLowerCase();
+
+/* -----------------------------
+  Vouches
+------------------------------ */
+// Fallback global (optionnel). Maintenant la vraie config est en DB par serveur.
 const VOUCH_CHANNEL_ID = process.env.VOUCH_CHANNEL_ID || null;
 const VOUCHBOARD_REFRESH_MS = Number(process.env.VOUCHBOARD_REFRESH_MS || 60000);
 
-// Rankup
+/* -----------------------------
+  Rankup
+------------------------------ */
 const RANKUP_STACK = (process.env.RANKUP_STACK || "false").toLowerCase() === "true";
 const RANKUP_LOG_CHANNEL_ID = process.env.RANKUP_LOG_CHANNEL_ID || null;
 
-// Tickets (fallback ENV, mais tu peux config via /ticket-config)
+/* -----------------------------
+  Tickets (fallback ENV, mais config par DB via /ticket-config)
+------------------------------ */
 const TICKET_CATEGORY_ID = process.env.TICKET_CATEGORY_ID || null;
 const TICKET_STAFF_ROLE_ID = process.env.TICKET_STAFF_ROLE_ID || null;
 const ADMIN_FEEDBACK_CHANNEL_ID = process.env.ADMIN_FEEDBACK_CHANNEL_ID || null;
@@ -41,17 +58,25 @@ const TICKET_CLAIM_EXCLUSIVE =
 const TICKET_DELETE_ON_CLOSE =
   (process.env.TICKET_DELETE_ON_CLOSE || "false").toLowerCase() === "true";
 
-// Giveaways
+/* -----------------------------
+  Giveaways
+------------------------------ */
 const GIVEAWAY_SWEEP_MS = Number(process.env.GIVEAWAY_SWEEP_MS || 15000);
 
-// Moderation (fallback ENV, mais tu peux config via /log)
+/* -----------------------------
+  Moderation (fallback ENV, mais config via /log)
+------------------------------ */
 const MODLOG_CHANNEL_ID = process.env.MODLOG_CHANNEL_ID || null;
 const MOD_STAFF_ROLE_ID = process.env.MOD_STAFF_ROLE_ID || null;
 
-if (!TOKEN || !CLIENT_ID || !GUILD_ID) {
-  console.error("Variables manquantes.\nAjoute DISCORD_TOKEN, CLIENT_ID, GUILD_ID.");
+/* -----------------------------
+  Checks
+------------------------------ */
+if (!TOKEN || !CLIENT_ID) {
+  console.error("Variables manquantes.\nAjoute DISCORD_TOKEN et CLIENT_ID.");
   process.exit(1);
 }
+
 if (!process.env.DATABASE_URL) {
   console.error(
     "DATABASE_URL manquant.\nAjoute une DB PostgreSQL (Railway) ou définis DATABASE_URL."
@@ -59,13 +84,24 @@ if (!process.env.DATABASE_URL) {
   process.exit(1);
 }
 
+if ((COMMANDS_SCOPE === "guild" || COMMANDS_SCOPE === "both") && !GUILD_ID) {
+  console.error(
+    "COMMANDS_SCOPE est 'guild' ou 'both' mais GUILD_ID est manquant.\nAjoute GUILD_ID ou mets COMMANDS_SCOPE=global."
+  );
+  process.exit(1);
+}
+
+/* -----------------------------
+  Config object
+------------------------------ */
 const config = {
   TOKEN,
   CLIENT_ID,
   GUILD_ID,
+  COMMANDS_SCOPE,
 
   // vouches
-  VOUCH_CHANNEL_ID,
+  VOUCH_CHANNEL_ID, // fallback ENV only
   VOUCHBOARD_REFRESH_MS,
 
   // rankup
@@ -90,7 +126,9 @@ const config = {
   MOD_STAFF_ROLE_ID,
 };
 
-// Railway/Postgres : SSL souvent nécessaire en prod
+/* -----------------------------
+  DB
+------------------------------ */
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: process.env.NODE_ENV === "production" ? { rejectUnauthorized: false } : false,
@@ -116,6 +154,13 @@ async function initDb() {
       channel_id TEXT NOT NULL,
       message_id TEXT NOT NULL,
       limit_count INTEGER NOT NULL DEFAULT 10,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+
+    /* ✅ nouveau : settings vouches par serveur */
+    CREATE TABLE IF NOT EXISTS vouch_settings (
+      guild_id TEXT PRIMARY KEY,
+      vouch_channel_id TEXT,
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
 
@@ -199,7 +244,7 @@ async function initDb() {
       host_id TEXT NOT NULL,
       winner_count INTEGER NOT NULL DEFAULT 1,
       end_at TIMESTAMPTZ NOT NULL,
-      status TEXT NOT NULL DEFAULT 'running', /* running|ended|cancelled */
+      status TEXT NOT NULL DEFAULT 'running',
       requirements JSONB NOT NULL DEFAULT '{}'::jsonb,
       winners JSONB NOT NULL DEFAULT '[]'::jsonb,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -225,12 +270,10 @@ async function initDb() {
       log_events JSONB NOT NULL DEFAULT '{}'::jsonb,
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
-
     CREATE TABLE IF NOT EXISTS mod_case_counters (
       guild_id TEXT PRIMARY KEY,
       last_case BIGINT NOT NULL DEFAULT 0
     );
-
     CREATE TABLE IF NOT EXISTS mod_cases (
       guild_id TEXT NOT NULL,
       case_id BIGINT NOT NULL,
@@ -247,25 +290,29 @@ async function initDb() {
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       PRIMARY KEY (guild_id, case_id)
     );
-
     CREATE INDEX IF NOT EXISTS idx_mod_cases_guild_target_created ON mod_cases (guild_id, target_id, created_at DESC);
     CREATE INDEX IF NOT EXISTS idx_mod_cases_guild_created ON mod_cases (guild_id, created_at DESC);
     CREATE INDEX IF NOT EXISTS idx_mod_cases_guild_action_created ON mod_cases (guild_id, action, created_at DESC);
   `);
 
-  console.log("✅ DB prête (vouches + rank_roles + tickets + giveaways + moderation OK)." );
+  console.log("✅ DB prête (vouches + rank_roles + tickets + giveaways + moderation OK).");
 }
 
+/* -----------------------------
+  Client
+------------------------------ */
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildMembers,
-    GatewayIntentBits.GuildMessages, // utile pour purge (fetch/bulkDelete)
-    GatewayIntentBits.MessageContent, // nécessaire pour les commandes en préfixe (ex: .banlist)
+    GatewayIntentBits.GuildMessages,
+    GatewayIntentBits.MessageContent, // pour tes commandes en préfixe (ex: .banlist)
   ],
 });
 
-// Services
+/* -----------------------------
+  Services
+------------------------------ */
 const rankup = createRankupService({ pool, config });
 const vouches = createVouchesService({ pool, config, rankup });
 const sendMessage = createSendMessageService();
@@ -273,6 +320,9 @@ const tickets = createTicketsService({ pool, config });
 const giveaways = createGiveawayService({ pool, config });
 const moderation = createModerationService({ pool, config });
 
+/* -----------------------------
+  Slash commands deployment
+------------------------------ */
 async function registerCommands() {
   const commands = [
     new SlashCommandBuilder().setName("ping").setDescription("Répond pong + latence"),
@@ -285,17 +335,43 @@ async function registerCommands() {
   ].map((c) => c.toJSON());
 
   const rest = new REST({ version: "10" }).setToken(TOKEN);
-  await rest.put(Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID), { body: commands });
-  console.log("✅ Slash commands enregistrées sur le serveur.");
+
+  if (COMMANDS_SCOPE === "global") {
+    await rest.put(Routes.applicationCommands(CLIENT_ID), { body: commands });
+    console.log("✅ Slash commands enregistrées en GLOBAL (multi-serveur).");
+    return;
+  }
+
+  if (COMMANDS_SCOPE === "guild") {
+    await rest.put(Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID), { body: commands });
+    console.log(`✅ Slash commands enregistrées sur le serveur (GUILD_ID=${GUILD_ID}).`);
+    return;
+  }
+
+  if (COMMANDS_SCOPE === "both") {
+    await rest.put(Routes.applicationCommands(CLIENT_ID), { body: commands });
+    await rest.put(Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID), { body: commands });
+    console.log("✅ Slash commands enregistrées en GLOBAL + GUILD (mode hybride).");
+    return;
+  }
+
+  console.warn(
+    `⚠️ COMMANDS_SCOPE invalide: '${COMMANDS_SCOPE}'. Mets global|guild|both. (fallback => global)`
+  );
+  await rest.put(Routes.applicationCommands(CLIENT_ID), { body: commands });
 }
 
+/* -----------------------------
+  Ready
+------------------------------ */
 client.once("ready", async () => {
   console.log(`✅ Connecté en tant que ${client.user.tag}`);
+
   try {
     await initDb();
     await registerCommands();
 
-    // vouchboard refresh + init
+    // vouchboard init + refresh
     for (const g of client.guilds.cache.values()) {
       await vouches.updateVouchboardMessage(client, g.id).catch(() => {});
     }
@@ -309,19 +385,24 @@ client.once("ready", async () => {
   }
 });
 
-// Logs globaux utiles
+/* -----------------------------
+  Logs globaux utiles
+------------------------------ */
 process.on("unhandledRejection", (err) => console.error("unhandledRejection:", err));
 process.on("uncaughtException", (err) => console.error("uncaughtException:", err));
 
+/* -----------------------------
+  Interactions
+------------------------------ */
 client.on("interactionCreate", async (interaction) => {
   try {
     // Tickets en premier (boutons/select/modals + slash)
     if (await tickets.handleInteraction(interaction, client)) return;
 
-    // Send-message ensuite (gère aussi ses modals)
+    // Send-message (gère aussi ses modals)
     if (await sendMessage.handleInteraction(interaction)) return;
 
-    // Giveaways (boutons + slash)
+    // Giveaways
     if (await giveaways.handleInteraction(interaction, client)) return;
 
     // Le reste: slash uniquement
@@ -338,6 +419,7 @@ client.on("interactionCreate", async (interaction) => {
     if (await moderation.handleInteraction(interaction, client)) return;
   } catch (e) {
     console.error("interactionCreate fatal:", e);
+
     if (interaction?.isRepliable?.()) {
       if (!interaction.deferred && !interaction.replied) {
         await interaction
@@ -353,15 +435,15 @@ client.on("interactionCreate", async (interaction) => {
   }
 });
 
-
+/* -----------------------------
+  Prefix commands (.)
+------------------------------ */
 client.on("messageCreate", async (message) => {
   try {
-    // Commandes en préfixe (.)
     if (await moderation.handleMessage?.(message, client)) return;
   } catch (e) {
     console.error("messageCreate fatal:", e);
   }
 });
-
 
 client.login(TOKEN);
