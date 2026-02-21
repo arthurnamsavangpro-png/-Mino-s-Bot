@@ -10,31 +10,26 @@ const {
 const { Pool } = require("pg");
 
 const { createVouchesService } = require("./vouches");
-const { createRankupService } = require("./rankup"); // ton rankup vouch (inchangé)
-const { createModrankService } = require("./modrank"); // ✅ NOUVEAU (séparé)
+const { createRankupService } = require("./rankup");
+const { createModrankService } = require("./modrank");
 const { createSendMessageService } = require("./send-message");
 const { createTicketsService } = require("./tickets");
 const { createGiveawayService } = require("./giveaway");
 const { createModerationService } = require("./moderation");
 
+// ✅ NOUVEAU
+const { createAutomodService } = require("./automod");
+
 /* ----------------------------- ENV ------------------------------ */
 const TOKEN = process.env.DISCORD_TOKEN;
 const CLIENT_ID = process.env.CLIENT_ID;
-
-// Dev only (optionnel) : si tu veux push les commandes vite sur 1 serveur
 const GUILD_ID = process.env.GUILD_ID || null;
 
-// Déploiement commandes:
-// - "global" (recommandé multi-serveur) => commandes pour tous les serveurs
-// - "guild" => commandes uniquement sur GUILD_ID (dev rapide)
-// - "both" => global + guild
 const COMMANDS_SCOPE = (
   process.env.COMMANDS_SCOPE || (GUILD_ID ? "guild" : "global")
 ).toLowerCase();
 
 /* ----------------------------- Vouches ------------------------------ */
-// Fallback global (optionnel).
-// Maintenant la vraie config est en DB par serveur.
 const VOUCH_CHANNEL_ID = process.env.VOUCH_CHANNEL_ID || null;
 const VOUCHBOARD_REFRESH_MS = Number(process.env.VOUCHBOARD_REFRESH_MS || 60000);
 
@@ -42,7 +37,7 @@ const VOUCHBOARD_REFRESH_MS = Number(process.env.VOUCHBOARD_REFRESH_MS || 60000)
 const RANKUP_STACK = (process.env.RANKUP_STACK || "false").toLowerCase() === "true";
 const RANKUP_LOG_CHANNEL_ID = process.env.RANKUP_LOG_CHANNEL_ID || null;
 
-/* ----------------------------- Tickets (fallback ENV, mais config par DB via /ticket-config) ------------------------------ */
+/* ----------------------------- Tickets ------------------------------ */
 const TICKET_CATEGORY_ID = process.env.TICKET_CATEGORY_ID || null;
 const TICKET_STAFF_ROLE_ID = process.env.TICKET_STAFF_ROLE_ID || null;
 const ADMIN_FEEDBACK_CHANNEL_ID = process.env.ADMIN_FEEDBACK_CHANNEL_ID || null;
@@ -55,7 +50,7 @@ const TICKET_DELETE_ON_CLOSE = (process.env.TICKET_DELETE_ON_CLOSE || "false").t
 /* ----------------------------- Giveaways ------------------------------ */
 const GIVEAWAY_SWEEP_MS = Number(process.env.GIVEAWAY_SWEEP_MS || 15000);
 
-/* ----------------------------- Moderation (fallback ENV, mais config via /log) ------------------------------ */
+/* ----------------------------- Moderation ------------------------------ */
 const MODLOG_CHANNEL_ID = process.env.MODLOG_CHANNEL_ID || null;
 const MOD_STAFF_ROLE_ID = process.env.MOD_STAFF_ROLE_ID || null;
 
@@ -65,15 +60,11 @@ if (!TOKEN || !CLIENT_ID) {
   process.exit(1);
 }
 if (!process.env.DATABASE_URL) {
-  console.error(
-    "DATABASE_URL manquant.\nAjoute une DB PostgreSQL (Railway) ou définis DATABASE_URL."
-  );
+  console.error("DATABASE_URL manquant.\nAjoute une DB PostgreSQL (Railway) ou définis DATABASE_URL.");
   process.exit(1);
 }
 if ((COMMANDS_SCOPE === "guild" || COMMANDS_SCOPE === "both") && !GUILD_ID) {
-  console.error(
-    "COMMANDS_SCOPE est 'guild' ou 'both' mais GUILD_ID est manquant.\nAjoute GUILD_ID ou mets COMMANDS_SCOPE=global."
-  );
+  console.error("COMMANDS_SCOPE est 'guild' ou 'both' mais GUILD_ID est manquant.\nAjoute GUILD_ID ou mets COMMANDS_SCOPE=global.");
   process.exit(1);
 }
 
@@ -83,16 +74,10 @@ const config = {
   CLIENT_ID,
   GUILD_ID,
   COMMANDS_SCOPE,
-
-  // vouches
-  VOUCH_CHANNEL_ID, // fallback ENV only
+  VOUCH_CHANNEL_ID,
   VOUCHBOARD_REFRESH_MS,
-
-  // rankup vouch
   RANKUP_STACK,
   RANKUP_LOG_CHANNEL_ID,
-
-  // tickets
   TICKET_CATEGORY_ID,
   TICKET_STAFF_ROLE_ID,
   ADMIN_FEEDBACK_CHANNEL_ID,
@@ -101,11 +86,7 @@ const config = {
   TICKET_COOLDOWN_SECONDS,
   TICKET_CLAIM_EXCLUSIVE,
   TICKET_DELETE_ON_CLOSE,
-
-  // giveaways
   GIVEAWAY_SWEEP_MS,
-
-  // moderation
   MODLOG_CHANNEL_ID,
   MOD_STAFF_ROLE_ID,
 };
@@ -139,7 +120,6 @@ async function initDb() {
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
 
-    /* ✅ settings vouches par serveur */
     CREATE TABLE IF NOT EXISTS vouch_settings (
       guild_id TEXT PRIMARY KEY,
       vouch_channel_id TEXT,
@@ -156,7 +136,7 @@ async function initDb() {
     );
     CREATE INDEX IF NOT EXISTS idx_rank_roles_guild_required ON rank_roles (guild_id, required_vouches);
 
-    /* ✅ --- modrank (modération, séparé des vouches) --- */
+    /* --- modrank --- */
     CREATE TABLE IF NOT EXISTS modrank_settings (
       guild_id TEXT PRIMARY KEY,
       announce_channel_id TEXT,
@@ -166,7 +146,6 @@ async function initDb() {
       mode TEXT NOT NULL DEFAULT 'highest',
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
-
     CREATE TABLE IF NOT EXISTS modrank_roles (
       guild_id TEXT NOT NULL,
       role_id TEXT NOT NULL,
@@ -194,7 +173,6 @@ async function initDb() {
       delete_on_close BOOLEAN NOT NULL DEFAULT FALSE,
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
-
     CREATE TABLE IF NOT EXISTS ticket_panels (
       panel_id TEXT PRIMARY KEY,
       guild_id TEXT NOT NULL,
@@ -302,9 +280,16 @@ async function initDb() {
     CREATE INDEX IF NOT EXISTS idx_mod_cases_guild_target_created ON mod_cases (guild_id, target_id, created_at DESC);
     CREATE INDEX IF NOT EXISTS idx_mod_cases_guild_created ON mod_cases (guild_id, created_at DESC);
     CREATE INDEX IF NOT EXISTS idx_mod_cases_guild_action_created ON mod_cases (guild_id, action, created_at DESC);
+
+    /* ✅ --- automod --- */
+    CREATE TABLE IF NOT EXISTS automod_settings (
+      guild_id TEXT PRIMARY KEY,
+      settings_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
   `);
 
-  console.log("✅ DB prête (vouches + rank_roles + modrank + tickets + giveaways + moderation OK).");
+  console.log("✅ DB prête (modules + automod OK).");
 }
 
 /* ----------------------------- Client ------------------------------ */
@@ -313,32 +298,34 @@ const client = new Client({
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildMembers,
     GatewayIntentBits.GuildMessages,
-    GatewayIntentBits.MessageContent, // pour tes commandes en préfixe
+    GatewayIntentBits.MessageContent,
   ],
 });
 
 /* ----------------------------- Services ------------------------------ */
-const rankup = createRankupService({ pool, config }); // vouch rankup
+const rankup = createRankupService({ pool, config });
 const vouches = createVouchesService({ pool, config, rankup });
-
-const modrank = createModrankService({ pool, config }); // ✅ nouveau système séparé
-
+const modrank = createModrankService({ pool, config });
 const sendMessage = createSendMessageService();
 const tickets = createTicketsService({ pool, config });
 const giveaways = createGiveawayService({ pool, config });
 const moderation = createModerationService({ pool, config });
+
+// ✅ NOUVEAU
+const automod = createAutomodService({ pool, config });
 
 /* ----------------------------- Slash commands deployment ------------------------------ */
 async function registerCommands() {
   const commands = [
     new SlashCommandBuilder().setName("ping").setDescription("Répond pong + latence"),
     ...vouches.commands,
-    ...rankup.commands, // vouch rankup (inchangé)
-    ...modrank.commands, // ✅ modrank
+    ...rankup.commands,
+    ...modrank.commands,
     ...sendMessage.commands,
     ...tickets.commands,
     ...giveaways.commands,
     ...moderation.commands,
+    ...automod.commands, // ✅
   ].map((c) => c.toJSON());
 
   const rest = new REST({ version: "10" }).setToken(TOKEN);
@@ -348,13 +335,11 @@ async function registerCommands() {
     console.log("✅ Slash commands enregistrées en GLOBAL (multi-serveur).");
     return;
   }
-
   if (COMMANDS_SCOPE === "guild") {
     await rest.put(Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID), { body: commands });
     console.log(`✅ Slash commands enregistrées sur le serveur (GUILD_ID=${GUILD_ID}).`);
     return;
   }
-
   if (COMMANDS_SCOPE === "both") {
     await rest.put(Routes.applicationCommands(CLIENT_ID), { body: commands });
     await rest.put(Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID), { body: commands });
@@ -362,9 +347,7 @@ async function registerCommands() {
     return;
   }
 
-  console.warn(
-    `⚠️ COMMANDS_SCOPE invalide: '${COMMANDS_SCOPE}'. Mets global|guild|both. (fallback => global)`
-  );
+  console.warn(`⚠️ COMMANDS_SCOPE invalide: '${COMMANDS_SCOPE}'. Mets global|guild|both. (fallback => global)`);
   await rest.put(Routes.applicationCommands(CLIENT_ID), { body: commands });
 }
 
@@ -397,14 +380,17 @@ process.on("uncaughtException", (err) => console.error("uncaughtException:", err
 /* ----------------------------- Interactions ------------------------------ */
 client.on("interactionCreate", async (interaction) => {
   try {
-    // Tickets en premier (boutons/select/modals + slash)
+    // Tickets
     if (await tickets.handleInteraction(interaction, client)) return;
 
-    // Send-message (gère aussi ses modals)
+    // Send-message
     if (await sendMessage.handleInteraction(interaction)) return;
 
     // Giveaways
     if (await giveaways.handleInteraction(interaction, client)) return;
+
+    // ✅ Automod (panel + config)
+    if (await automod.handleInteraction(interaction, client)) return;
 
     // Le reste: slash uniquement
     if (!interaction.isChatInputCommand()) return;
@@ -416,22 +402,15 @@ client.on("interactionCreate", async (interaction) => {
     }
 
     if (await vouches.handleInteraction(interaction, client)) return;
-
-    if (await rankup.handleInteraction(interaction)) return; // vouch rankup (inchangé)
-
-    if (await modrank.handleInteraction(interaction, client)) return; // ✅ modrank séparé
-
+    if (await rankup.handleInteraction(interaction)) return;
+    if (await modrank.handleInteraction(interaction, client)) return;
     if (await moderation.handleInteraction(interaction, client)) return;
   } catch (e) {
     console.error("interactionCreate fatal:", e);
-
     if (interaction?.isRepliable?.()) {
       if (!interaction.deferred && !interaction.replied) {
         await interaction
-          .reply({
-            content: "⚠️ Erreur interne (voir logs).",
-            flags: MessageFlags.Ephemeral,
-          })
+          .reply({ content: "⚠️ Erreur interne (voir logs).", flags: MessageFlags.Ephemeral })
           .catch(() => {});
       } else if (interaction.deferred && !interaction.replied) {
         await interaction.editReply("⚠️ Erreur interne (voir logs).").catch(() => {});
@@ -440,12 +419,50 @@ client.on("interactionCreate", async (interaction) => {
   }
 });
 
-/* ----------------------------- Prefix commands (.) ------------------------------ */
+/* ----------------------------- Prefix commands + Automod message ------------------------------ */
 client.on("messageCreate", async (message) => {
   try {
+    // ✅ Automod d’abord (anti mention/link)
+    if (await automod.handleMessage(message, client)) return;
+
+    // mod prefix (ex: .banlist)
     if (await moderation.handleMessage?.(message, client)) return;
   } catch (e) {
     console.error("messageCreate fatal:", e);
+  }
+});
+
+/* ----------------------------- Automod join + admin raid listeners ------------------------------ */
+client.on("guildMemberAdd", async (member) => {
+  try {
+    await automod.handleGuildMemberAdd(member, client);
+  } catch (e) {
+    console.error("guildMemberAdd fatal:", e);
+  }
+});
+
+client.on("channelCreate", async (channel) => {
+  try {
+    await automod.handleChannelCreate(channel, client);
+  } catch (e) {
+    console.error("channelCreate fatal:", e);
+  }
+});
+
+client.on("channelDelete", async (channel) => {
+  try {
+    await automod.handleChannelDelete(channel, client);
+  } catch (e) {
+    console.error("channelDelete fatal:", e);
+  }
+});
+
+// webhook updates (best effort)
+client.on("webhooksUpdate", async (channel) => {
+  try {
+    await automod.handleWebhooksUpdate(channel, client);
+  } catch (e) {
+    console.error("webhooksUpdate fatal:", e);
   }
 });
 
