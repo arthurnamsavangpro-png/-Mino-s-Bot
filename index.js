@@ -16,18 +16,21 @@ const { createSendMessageService } = require("./send-message");
 const { createTicketsService } = require("./tickets");
 const { createGiveawayService } = require("./giveaway");
 const { createModerationService } = require("./moderation");
-
-// ✅ NOUVEAU
 const { createAutomodService } = require("./automod");
+
+// ✅ NOUVEAU : updates/broadcast
+const { createUpdatesService } = require("./updates");
 
 /* ----------------------------- ENV ------------------------------ */
 const TOKEN = process.env.DISCORD_TOKEN;
 const CLIENT_ID = process.env.CLIENT_ID;
 const GUILD_ID = process.env.GUILD_ID || null;
-
 const COMMANDS_SCOPE = (
   process.env.COMMANDS_SCOPE || (GUILD_ID ? "guild" : "global")
 ).toLowerCase();
+
+// ✅ owner id pour /broadcast & /broadcastembed
+const OWNER_ID = process.env.OWNER_ID || null;
 
 /* ----------------------------- Vouches ------------------------------ */
 const VOUCH_CHANNEL_ID = process.env.VOUCH_CHANNEL_ID || null;
@@ -44,8 +47,10 @@ const ADMIN_FEEDBACK_CHANNEL_ID = process.env.ADMIN_FEEDBACK_CHANNEL_ID || null;
 const TICKET_TRANSCRIPT_CHANNEL_ID = process.env.TICKET_TRANSCRIPT_CHANNEL_ID || null;
 const TICKET_MAX_OPEN_PER_USER = Number(process.env.TICKET_MAX_OPEN_PER_USER || 1);
 const TICKET_COOLDOWN_SECONDS = Number(process.env.TICKET_COOLDOWN_SECONDS || 600);
-const TICKET_CLAIM_EXCLUSIVE = (process.env.TICKET_CLAIM_EXCLUSIVE || "false").toLowerCase() === "true";
-const TICKET_DELETE_ON_CLOSE = (process.env.TICKET_DELETE_ON_CLOSE || "false").toLowerCase() === "true";
+const TICKET_CLAIM_EXCLUSIVE =
+  (process.env.TICKET_CLAIM_EXCLUSIVE || "false").toLowerCase() === "true";
+const TICKET_DELETE_ON_CLOSE =
+  (process.env.TICKET_DELETE_ON_CLOSE || "false").toLowerCase() === "true";
 
 /* ----------------------------- Giveaways ------------------------------ */
 const GIVEAWAY_SWEEP_MS = Number(process.env.GIVEAWAY_SWEEP_MS || 15000);
@@ -64,7 +69,9 @@ if (!process.env.DATABASE_URL) {
   process.exit(1);
 }
 if ((COMMANDS_SCOPE === "guild" || COMMANDS_SCOPE === "both") && !GUILD_ID) {
-  console.error("COMMANDS_SCOPE est 'guild' ou 'both' mais GUILD_ID est manquant.\nAjoute GUILD_ID ou mets COMMANDS_SCOPE=global.");
+  console.error(
+    "COMMANDS_SCOPE est 'guild' ou 'both' mais GUILD_ID est manquant.\nAjoute GUILD_ID ou mets COMMANDS_SCOPE=global."
+  );
   process.exit(1);
 }
 
@@ -74,10 +81,15 @@ const config = {
   CLIENT_ID,
   GUILD_ID,
   COMMANDS_SCOPE,
+
+  OWNER_ID, // ✅
+
   VOUCH_CHANNEL_ID,
   VOUCHBOARD_REFRESH_MS,
+
   RANKUP_STACK,
   RANKUP_LOG_CHANNEL_ID,
+
   TICKET_CATEGORY_ID,
   TICKET_STAFF_ROLE_ID,
   ADMIN_FEEDBACK_CHANNEL_ID,
@@ -86,7 +98,9 @@ const config = {
   TICKET_COOLDOWN_SECONDS,
   TICKET_CLAIM_EXCLUSIVE,
   TICKET_DELETE_ON_CLOSE,
+
   GIVEAWAY_SWEEP_MS,
+
   MODLOG_CHANNEL_ID,
   MOD_STAFF_ROLE_ID,
 };
@@ -154,7 +168,6 @@ async function initDb() {
       PRIMARY KEY (guild_id, role_id)
     );
     CREATE INDEX IF NOT EXISTS idx_modrank_roles_guild_position ON modrank_roles (guild_id, position);
-
     CREATE TABLE IF NOT EXISTS modrank_counters (
       guild_id TEXT PRIMARY KEY,
       last_ref BIGINT NOT NULL DEFAULT 0
@@ -255,12 +268,10 @@ async function initDb() {
       log_events JSONB NOT NULL DEFAULT '{}'::jsonb,
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
-
     CREATE TABLE IF NOT EXISTS mod_case_counters (
       guild_id TEXT PRIMARY KEY,
       last_case BIGINT NOT NULL DEFAULT 0
     );
-
     CREATE TABLE IF NOT EXISTS mod_cases (
       guild_id TEXT NOT NULL,
       case_id BIGINT NOT NULL,
@@ -287,9 +298,17 @@ async function initDb() {
       settings_json JSONB NOT NULL DEFAULT '{}'::jsonb,
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
+
+    /* ✅ --- updates / broadcast --- */
+    CREATE TABLE IF NOT EXISTS updates_settings (
+      guild_id TEXT PRIMARY KEY,
+      channel_id TEXT,
+      enabled BOOLEAN NOT NULL DEFAULT TRUE,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
   `);
 
-  console.log("✅ DB prête (modules + automod OK).");
+  console.log("✅ DB prête (modules + automod + updates OK).");
 }
 
 /* ----------------------------- Client ------------------------------ */
@@ -310,14 +329,16 @@ const sendMessage = createSendMessageService();
 const tickets = createTicketsService({ pool, config });
 const giveaways = createGiveawayService({ pool, config });
 const moderation = createModerationService({ pool, config });
+const automod = createAutomodService({ pool, config });
 
 // ✅ NOUVEAU
-const automod = createAutomodService({ pool, config });
+const updates = createUpdatesService({ pool, config });
 
 /* ----------------------------- Slash commands deployment ------------------------------ */
 async function registerCommands() {
   const commands = [
     new SlashCommandBuilder().setName("ping").setDescription("Répond pong + latence"),
+
     ...vouches.commands,
     ...rankup.commands,
     ...modrank.commands,
@@ -325,7 +346,10 @@ async function registerCommands() {
     ...tickets.commands,
     ...giveaways.commands,
     ...moderation.commands,
-    ...automod.commands, // ✅
+    ...automod.commands,
+
+    // ✅ updates
+    ...updates.commands,
   ].map((c) => c.toJSON());
 
   const rest = new REST({ version: "10" }).setToken(TOKEN);
@@ -335,11 +359,13 @@ async function registerCommands() {
     console.log("✅ Slash commands enregistrées en GLOBAL (multi-serveur).");
     return;
   }
+
   if (COMMANDS_SCOPE === "guild") {
     await rest.put(Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID), { body: commands });
     console.log(`✅ Slash commands enregistrées sur le serveur (GUILD_ID=${GUILD_ID}).`);
     return;
   }
+
   if (COMMANDS_SCOPE === "both") {
     await rest.put(Routes.applicationCommands(CLIENT_ID), { body: commands });
     await rest.put(Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID), { body: commands });
@@ -347,7 +373,9 @@ async function registerCommands() {
     return;
   }
 
-  console.warn(`⚠️ COMMANDS_SCOPE invalide: '${COMMANDS_SCOPE}'. Mets global|guild|both. (fallback => global)`);
+  console.warn(`⚠️ COMMANDS_SCOPE invalide: '${COMMANDS_SCOPE}'.
+Mets global|guild|both.
+(fallback => global)`);
   await rest.put(Routes.applicationCommands(CLIENT_ID), { body: commands });
 }
 
@@ -392,6 +420,9 @@ client.on("interactionCreate", async (interaction) => {
     // ✅ Automod (panel + config)
     if (await automod.handleInteraction(interaction, client)) return;
 
+    // ✅ Updates/broadcast
+    if (await updates.handleInteraction(interaction, client)) return;
+
     // Le reste: slash uniquement
     if (!interaction.isChatInputCommand()) return;
 
@@ -407,10 +438,14 @@ client.on("interactionCreate", async (interaction) => {
     if (await moderation.handleInteraction(interaction, client)) return;
   } catch (e) {
     console.error("interactionCreate fatal:", e);
+
     if (interaction?.isRepliable?.()) {
       if (!interaction.deferred && !interaction.replied) {
         await interaction
-          .reply({ content: "⚠️ Erreur interne (voir logs).", flags: MessageFlags.Ephemeral })
+          .reply({
+            content: "⚠️ Erreur interne (voir logs).",
+            flags: MessageFlags.Ephemeral,
+          })
           .catch(() => {});
       } else if (interaction.deferred && !interaction.replied) {
         await interaction.editReply("⚠️ Erreur interne (voir logs).").catch(() => {});
