@@ -6,16 +6,6 @@ const {
   MessageFlags,
 } = require("discord.js");
 
-function boolFromStr(v, def = false) {
-  if (v === undefined || v === null) return def;
-  return String(v).toLowerCase() === "true";
-}
-
-function safeInt(v, def = 0) {
-  const n = Number(v);
-  return Number.isFinite(n) ? n : def;
-}
-
 function nowUnix() {
   return Math.floor(Date.now() / 1000);
 }
@@ -40,8 +30,12 @@ function createModrankService({ pool, config }) {
       [guildId]
     );
     if (!rows[0]) {
-      // fallback defaults sans créer automatiquement (on peut créer au premier /modrank config)
-      return { guild_id: guildId, ...DEFAULTS, announce_channel_id: null, log_channel_id: null };
+      return {
+        guild_id: guildId,
+        ...DEFAULTS,
+        announce_channel_id: null,
+        log_channel_id: null,
+      };
     }
     const s = rows[0];
     return {
@@ -112,7 +106,6 @@ function createModrankService({ pool, config }) {
   }
 
   async function moveRole(guildId, roleId, direction) {
-    // direction: up|down (swap avec voisin)
     const roles = await listRoles(guildId);
     const idx = roles.findIndex((r) => r.role_id === roleId);
     if (idx === -1) return { ok: false, msg: "Rôle introuvable dans l’échelle." };
@@ -138,7 +131,6 @@ function createModrankService({ pool, config }) {
   }
 
   async function nextRef(guildId) {
-    // compteur par serveur (MR-000001, etc.)
     await pool.query(
       `INSERT INTO modrank_counters (guild_id, last_ref) VALUES ($1, 0)
        ON CONFLICT (guild_id) DO NOTHING`,
@@ -169,10 +161,9 @@ function createModrankService({ pool, config }) {
 
   function makeLuxuryEmbed({
     interaction,
-    targetUser,
-    targetAvatar,
     title,
     description,
+    thumbnailUrl,
     fields,
   }) {
     const { guildName, guildIcon } = guildBranding(interaction);
@@ -181,11 +172,11 @@ function createModrankService({ pool, config }) {
       .setColor(0xe10600) // rouge premium
       .setAuthor({
         name: guildName,
-        iconURL: guildIcon ?? undefined, // logo serveur ici (brand)
+        iconURL: guildIcon ?? undefined, // logo serveur (brand)
       })
       .setTitle(title)
       .setDescription(description)
-      .setThumbnail(targetAvatar) // avatar membre en thumbnail
+      .setThumbnail(thumbnailUrl)
       .addFields(fields)
       .setFooter({ text: guildName });
 
@@ -200,13 +191,12 @@ function createModrankService({ pool, config }) {
   }
 
   async function getCurrentModrankRoleId(member, roleIdsInScale) {
-    // Renvoie le rôle ModRank le plus haut actuellement (selon l’ordre position ASC => bas->haut)
-    // Donc le plus haut = dernier trouvé dans la liste ordonnée.
+    // plus haut = dernier rencontré dans la liste ordonnée (bas->haut)
     let found = null;
     for (const roleId of roleIdsInScale) {
       if (member.roles.cache.has(roleId)) found = roleId;
     }
-    return found; // null si aucun
+    return found;
   }
 
   async function applyModrank({
@@ -215,16 +205,17 @@ function createModrankService({ pool, config }) {
     targetMember,
     newRoleId,
     reason,
-    actionLabel, // "Promotion" / "Rétrogradation" / "Ajustement"
+    actionLabel,
   }) {
     const guildId = interaction.guildId;
     const settings = await getSettings(guildId);
     const scale = await listRoles(guildId);
+
     if (!scale.length) {
       return { ok: false, msg: "Aucun ModRank configuré. Utilise `/modrank add`." };
     }
 
-    // Vérifs rôle existe
+    // Vérifs rôle
     const newRole = await interaction.guild.roles.fetch(newRoleId).catch(() => null);
     if (!newRole) return { ok: false, msg: "Rôle introuvable sur le serveur." };
 
@@ -233,24 +224,32 @@ function createModrankService({ pool, config }) {
     if (!me) return { ok: false, msg: "Impossible de vérifier la hiérarchie du bot." };
 
     if (newRole.position >= me.roles.highest.position) {
-      return { ok: false, msg: "Je ne peux pas attribuer ce rôle (hiérarchie du bot insuffisante)." };
+      return {
+        ok: false,
+        msg: "Je ne peux pas attribuer ce rôle (hiérarchie du bot insuffisante).",
+      };
     }
 
-    // Optionnel: empêcher qu’un mod donne un rôle au-dessus de lui-même
+    // Empêcher qu’un mod donne au-dessus de lui-même (sauf admin)
     if (
       interaction.member &&
       newRole.position >= interaction.member.roles.highest.position &&
       !interaction.memberPermissions.has(PermissionsBitField.Flags.Administrator)
     ) {
-      return { ok: false, msg: "Tu ne peux pas attribuer un rôle au-dessus (ou égal) à ton plus haut rôle." };
+      return {
+        ok: false,
+        msg: "Tu ne peux pas attribuer un rôle au-dessus (ou égal) à ton plus haut rôle.",
+      };
     }
 
     const roleIdsInScale = scale.map((r) => r.role_id);
     const oldRoleId = await getCurrentModrankRoleId(targetMember, roleIdsInScale);
 
-    // Mode highest: retirer tous les rôles ModRank avant d’ajouter le nouveau
+    // Mode highest: retirer tous les ModRanks avant d’ajouter le nouveau
     if (settings.mode === "highest") {
-      const toRemove = roleIdsInScale.filter((rid) => targetMember.roles.cache.has(rid) && rid !== newRoleId);
+      const toRemove = roleIdsInScale.filter(
+        (rid) => targetMember.roles.cache.has(rid) && rid !== newRoleId
+      );
       if (toRemove.length) {
         await targetMember.roles.remove(toRemove, "ModRank: mode highest").catch(() => null);
       }
@@ -267,32 +266,45 @@ function createModrankService({ pool, config }) {
     const targetUser = targetMember.user;
     const targetAvatar = targetUser.displayAvatarURL({ extension: "png", size: 256 });
 
-    const oldRoleName = oldRoleId ? `<@&${oldRoleId}>` : "—";
-    const newRoleName = `<@&${newRoleId}>`;
+    // ✅ IMPORTANT: deux formats (serveur vs DM)
+    const oldRoleObj = oldRoleId
+      ? await interaction.guild.roles.fetch(oldRoleId).catch(() => null)
+      : null;
 
-    const embed = makeLuxuryEmbed({
+    // Mentions (OK dans serveur)
+    const oldRoleMention = oldRoleId ? `<@&${oldRoleId}>` : "—";
+    const newRoleMention = `<@&${newRoleId}>`;
+
+    // Texte lisible (OK en DM)
+    const oldRoleText = oldRoleObj ? `@${oldRoleObj.name}` : "—";
+    const newRoleText = newRole ? `@${newRole.name}` : `@${newRoleId}`;
+
+    // ---------- Embed annonce (serveur) ----------
+    const announceEmbed = makeLuxuryEmbed({
       interaction,
-      targetUser,
-      targetAvatar,
       title: "Mise à niveau confirmée",
       description: "Le statut du membre a été mis à jour.",
+      thumbnailUrl: targetAvatar,
       fields: [
         { name: "Membre", value: `${targetUser}`, inline: true },
-        { name: "Évolution", value: `${oldRoleName} → ${newRoleName}`, inline: true },
+        { name: "Évolution", value: `${oldRoleMention} → ${newRoleMention}`, inline: true },
         { name: "Motif", value: reason?.trim() ? reason : "—", inline: false },
         { name: "Validé par", value: `${interaction.user}`, inline: true },
         { name: "Référence", value: `${refId} • <t:${ts}:F>`, inline: true },
       ],
     });
 
-    // Annonce publique (optionnelle)
     const announcePayload = {
       content: settings.ping_enabled ? `${targetUser}` : null,
-      embeds: [embed],
+      embeds: [announceEmbed],
     };
-    const announceMsg = await sendToChannelSafe(client, settings.announce_channel_id, announcePayload);
+    const announceMsg = await sendToChannelSafe(
+      client,
+      settings.announce_channel_id,
+      announcePayload
+    );
 
-    // Log staff (optionnel) - embed “audit” sobre mais dans le même style
+    // ---------- Log staff (serveur) ----------
     const { guildName, guildIcon } = guildBranding(interaction);
     const logEmbed = new EmbedBuilder()
       .setColor(0xe10600)
@@ -301,8 +313,8 @@ function createModrankService({ pool, config }) {
       .setDescription(`${actionLabel} effectuée.`)
       .addFields(
         { name: "Membre", value: `${targetUser} (\`${targetUser.id}\`)`, inline: false },
-        { name: "Avant", value: `${oldRoleName}`, inline: true },
-        { name: "Après", value: `${newRoleName}`, inline: true },
+        { name: "Avant", value: `${oldRoleMention}`, inline: true },
+        { name: "Après", value: `${newRoleMention}`, inline: true },
         { name: "Modérateur", value: `${interaction.user} (\`${interaction.user.id}\`)`, inline: false },
         { name: "Motif", value: reason?.trim() ? reason : "—", inline: false },
         { name: "Référence", value: `${refId} • <t:${ts}:F>`, inline: true },
@@ -312,16 +324,16 @@ function createModrankService({ pool, config }) {
 
     await sendToChannelSafe(client, settings.log_channel_id, { embeds: [logEmbed] });
 
-    // DM (optionnel)
+    // ---------- DM (texte lisible, plus de rôle inconnu) ----------
     if (settings.dm_enabled) {
       const dmEmbed = makeLuxuryEmbed({
         interaction,
-        targetUser,
-        targetAvatar,
         title: "Mise à jour de votre statut",
         description: `Votre rang a été ajusté sur **${interaction.guild.name}**.`,
+        thumbnailUrl: targetAvatar,
         fields: [
-          { name: "Évolution", value: `${oldRoleName} → ${newRoleName}`, inline: false },
+          // ✅ ICI: texte lisible
+          { name: "Évolution", value: `${oldRoleText} → ${newRoleText}`, inline: false },
           { name: "Validé par", value: `${interaction.user}`, inline: true },
           { name: "Motif", value: reason?.trim() ? reason : "—", inline: true },
           { name: "Référence", value: `${refId} • <t:${ts}:F>`, inline: false },
@@ -339,7 +351,6 @@ function createModrankService({ pool, config }) {
       new SlashCommandBuilder()
         .setName("modrank")
         .setDescription("Système de rangs modération (séparé des vouches)")
-        // CONFIG
         .addSubcommand((sc) =>
           sc
             .setName("config")
@@ -367,7 +378,6 @@ function createModrankService({ pool, config }) {
                 .setRequired(false)
             )
         )
-        // ADD
         .addSubcommand((sc) =>
           sc
             .setName("add")
@@ -382,16 +392,13 @@ function createModrankService({ pool, config }) {
                 .setMaxValue(1000)
             )
         )
-        // REMOVE
         .addSubcommand((sc) =>
           sc
             .setName("remove")
             .setDescription("Retirer un rôle de l’échelle ModRank")
             .addRoleOption((o) => o.setName("role").setDescription("Rôle").setRequired(true))
         )
-        // LIST
         .addSubcommand((sc) => sc.setName("list").setDescription("Lister l’échelle ModRank"))
-        // MOVE
         .addSubcommand((sc) =>
           sc
             .setName("move")
@@ -405,35 +412,24 @@ function createModrankService({ pool, config }) {
                 .setRequired(true)
             )
         )
-        // UP
         .addSubcommand((sc) =>
           sc
             .setName("up")
             .setDescription("Promouvoir un membre au rang ModRank supérieur")
             .addUserOption((o) => o.setName("membre").setDescription("Membre").setRequired(true))
             .addStringOption((o) =>
-              o
-                .setName("motif")
-                .setDescription("Motif (optionnel)")
-                .setRequired(false)
-                .setMaxLength(300)
+              o.setName("motif").setDescription("Motif (optionnel)").setRequired(false).setMaxLength(300)
             )
         )
-        // DOWN
         .addSubcommand((sc) =>
           sc
             .setName("down")
             .setDescription("Rétrograder un membre au rang ModRank inférieur")
             .addUserOption((o) => o.setName("membre").setDescription("Membre").setRequired(true))
             .addStringOption((o) =>
-              o
-                .setName("motif")
-                .setDescription("Motif (optionnel)")
-                .setRequired(false)
-                .setMaxLength(300)
+              o.setName("motif").setDescription("Motif (optionnel)").setRequired(false).setMaxLength(300)
             )
         )
-        // SET
         .addSubcommand((sc) =>
           sc
             .setName("set")
@@ -441,14 +437,9 @@ function createModrankService({ pool, config }) {
             .addUserOption((o) => o.setName("membre").setDescription("Membre").setRequired(true))
             .addRoleOption((o) => o.setName("role").setDescription("Rôle ModRank").setRequired(true))
             .addStringOption((o) =>
-              o
-                .setName("motif")
-                .setDescription("Motif (optionnel)")
-                .setRequired(false)
-                .setMaxLength(300)
+              o.setName("motif").setDescription("Motif (optionnel)").setRequired(false).setMaxLength(300)
             )
         )
-        // INFO
         .addSubcommand((sc) =>
           sc
             .setName("info")
@@ -462,9 +453,11 @@ function createModrankService({ pool, config }) {
     if (!interaction.isChatInputCommand()) return false;
     if (interaction.commandName !== "modrank") return false;
 
-    // Permissions: config & gestion échelle = admin, actions up/down/set = manage roles
     const sub = interaction.options.getSubcommand();
 
+    // Permissions:
+    // - config/échelle = admin
+    // - up/down/set/info = manage roles
     if (sub === "config" || sub === "add" || sub === "remove" || sub === "move") {
       if (!isAdmin(interaction)) {
         await interaction.reply({
@@ -485,7 +478,7 @@ function createModrankService({ pool, config }) {
 
     const guildId = interaction.guildId;
 
-    // ---------- CONFIG ----------
+    // CONFIG
     if (sub === "config") {
       const announce = interaction.options.getChannel("announce_channel");
       const log = interaction.options.getChannel("log_channel");
@@ -515,7 +508,7 @@ function createModrankService({ pool, config }) {
       return true;
     }
 
-    // ---------- ADD ----------
+    // ADD
     if (sub === "add") {
       const role = interaction.options.getRole("role", true);
       const position = interaction.options.getInteger("position", true);
@@ -529,7 +522,7 @@ function createModrankService({ pool, config }) {
       return true;
     }
 
-    // ---------- REMOVE ----------
+    // REMOVE
     if (sub === "remove") {
       const role = interaction.options.getRole("role", true);
       await removeRole(guildId, role.id);
@@ -541,7 +534,7 @@ function createModrankService({ pool, config }) {
       return true;
     }
 
-    // ---------- LIST ----------
+    // LIST
     if (sub === "list") {
       const roles = await listRoles(guildId);
       if (!roles.length) {
@@ -561,7 +554,7 @@ function createModrankService({ pool, config }) {
       return true;
     }
 
-    // ---------- MOVE ----------
+    // MOVE
     if (sub === "move") {
       const role = interaction.options.getRole("role", true);
       const direction = interaction.options.getString("direction", true);
@@ -582,6 +575,7 @@ function createModrankService({ pool, config }) {
     // Actions membre
     const targetUser = interaction.options.getUser("membre", true);
     const reason = interaction.options.getString("motif") || null;
+
     const targetMember = await interaction.guild.members.fetch(targetUser.id).catch(() => null);
     if (!targetMember) {
       await interaction.reply({
@@ -601,13 +595,14 @@ function createModrankService({ pool, config }) {
     }
     const roleIdsInScale = scale.map((r) => r.role_id);
 
-    // ---------- INFO ----------
+    // INFO
     if (sub === "info") {
       const currentRoleId = await getCurrentModrankRoleId(targetMember, roleIdsInScale);
       const idx = currentRoleId ? roleIdsInScale.indexOf(currentRoleId) : -1;
 
       const current = currentRoleId ? `<@&${currentRoleId}>` : "—";
-      const next = idx >= 0 && idx < roleIdsInScale.length - 1 ? `<@&${roleIdsInScale[idx + 1]}>` : "—";
+      const next =
+        idx >= 0 && idx < roleIdsInScale.length - 1 ? `<@&${roleIdsInScale[idx + 1]}>` : "—";
       const prev = idx > 0 ? `<@&${roleIdsInScale[idx - 1]}>` : "—";
 
       await interaction.reply({
@@ -621,13 +616,11 @@ function createModrankService({ pool, config }) {
       return true;
     }
 
-    // ---------- SET ----------
+    // SET
     if (sub === "set") {
       const role = interaction.options.getRole("role", true);
 
-      // Vérifier que le rôle appartient à l’échelle ModRank
-      const inScale = roleIdsInScale.includes(role.id);
-      if (!inScale) {
+      if (!roleIdsInScale.includes(role.id)) {
         await interaction.reply({
           content: "⚠️ Ce rôle n’est pas dans l’échelle ModRank. Ajoute-le via `/modrank add`.",
           flags: MessageFlags.Ephemeral,
@@ -656,7 +649,7 @@ function createModrankService({ pool, config }) {
       return true;
     }
 
-    // ---------- UP / DOWN ----------
+    // UP / DOWN
     const currentRoleId = await getCurrentModrankRoleId(targetMember, roleIdsInScale);
     const idx = currentRoleId ? roleIdsInScale.indexOf(currentRoleId) : -1;
 
@@ -694,7 +687,6 @@ function createModrankService({ pool, config }) {
     if (sub === "down") {
       const newIdx = idx === -1 ? -1 : idx - 1;
       if (newIdx < 0) {
-        // si aucun rang, ou déjà au plus bas => on retire les ranks (mode highest) ? on reste simple
         await interaction.reply({
           content: "⚠️ Ce membre n’a pas de rang ModRank à rétrograder (ou déjà au plus bas).",
           flags: MessageFlags.Ephemeral,
