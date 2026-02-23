@@ -1,19 +1,15 @@
-// tickets.js (FULL) — Premium Setup Wizard + Premium Ticket Panel Builder + Panel Premium (Select/Buttons/Simple → Modal → Ticket)
+// tickets.js (FULL) — Premium Setup Wizard + Premium Ticket Panel Builder + Panel Premium (Select/Buttons/Simple → Modal/Form (optional) → Ticket)
 // ✅ Conserve: ticket-config, ticket-stats, tout le système ticket:* (claim/close/transcript/delete/feedback)
-// ✅ Ajoute:
-//   - /ticket-setup : wizard premium (config système + publier panel premium)
-//   - /ticket-panel : NOW = interface premium (Panel Builder) + fallback legacy si options fournies
-//   - panels premium: ticketp:select / ticketp:open / ticketp:modal  => Select/Buttons/Simple → Modal → Ticket créé
-// ✅ Ajout demandé:
-//   - Dans /ticket-panel builder: bouton 🧊 Mode Simple
-//     -> ouvre une modal pour: Image droite (thumbnail), Titre, Texte, Footer, Catégorie (libre)
-//     -> puis select couleur du bouton (Bleu/Vert/Rouge/Gris)
-//     -> Aperçu / Publier utilisent automatiquement le Mode Simple si activé
+// ✅ Ajouts demandés (dans /ticket-panel builder):
+//   - Toggle "Formulaire" ✅ Avec / ❌ Sans
+//      -> Avec  : Catégorie → Modal → Ticket
+//      -> Sans  : Catégorie → Ticket direct (sans modal)
+//   - Mode Simple: possibilité de modifier le texte du bouton (via option après la modal, car modal Discord max 5 champs)
 //
 // Notes:
 // - Fix Discord limit select options <= 25 (helper safeSliceForSelect)
 // - /ticket-panel: si "mode" est fourni => comportement legacy (comme avant). Sinon => builder premium.
-// - Discord modal = max 5 inputs => la couleur bouton est choisie via un select après la modal.
+// - Discord modal = max 5 inputs => pour Mode Simple, la couleur + texte bouton sont réglés via actions après la modal.
 
 const crypto = require("crypto");
 const {
@@ -1498,6 +1494,7 @@ function createTicketsService({ pool, config }) {
   }
 
   /* ---------------- Premium Setup Wizard (/ticket-setup) ---------------- */
+  // (inchangé)
 
   function buildSetupHomeEmbed(guild, settings, draft) {
     const types = draft?.types?.length || 0;
@@ -1558,6 +1555,9 @@ function createTicketsService({ pool, config }) {
     await replyEphemeral(interaction, { embeds: [embed], components: buildSetupHomeComponents() });
     return true;
   }
+
+  // setupConfig / setupLimitsModal / setupTypes / setupTypeModal / setupPickType / setupPreview / setupPublish / publishPanelToChannel
+  // (inchangé) — je laisse tel quel pour ne pas casser ton wizard
 
   async function setupConfig(interaction) {
     if (!isAdmin(interaction)) return true;
@@ -1882,7 +1882,7 @@ function createTicketsService({ pool, config }) {
     return true;
   }
 
-  /* ---------------- Premium ticket: Select/Buttons/Simple -> Modal -> Create ---------------- */
+  /* ---------------- Premium ticket: Select/Buttons/Simple -> (Modal optionnel) -> Create ---------------- */
 
   async function openPremiumModal(interaction, panelId, selectedValue, label) {
     const modal = new ModalBuilder()
@@ -1914,18 +1914,43 @@ function createTicketsService({ pool, config }) {
     return true;
   }
 
+  function shouldUseFormForPreview(interaction) {
+    const pb = getPanelDraft(interaction.guildId, interaction.user.id);
+    if (pb && typeof pb.form_enabled === "boolean") return pb.form_enabled;
+    // défaut premium = avec formulaire
+    return true;
+  }
+
+  async function shouldUseFormForPanel(panelId, interaction) {
+    if (panelId === "preview") return shouldUseFormForPreview(interaction);
+
+    const panel = await getPanel(panelId);
+    const payload = parsePanelPayload(panel?.categories);
+    if (payload && typeof payload.useForm === "boolean") return payload.useForm;
+
+    // backward compatible: si absent => on considère "Avec"
+    return true;
+  }
+
   /* ---------------- /ticket-panel PREMIUM BUILDER ---------------- */
 
   function defaultPanelBuilderDraft(guild) {
     return {
       title: `🎫 ${guild?.name || "Support"} • Ticket Center`,
-      description: ["Sélectionne une catégorie puis remplis le formulaire.", "", "✅ **Rapide** • 🧾 **Clair** • 🔒 **Sécurisé**"].join(
-        "\n"
-      ),
+      description: [
+        "Sélectionne une catégorie puis remplis le formulaire.",
+        "",
+        "✅ **Rapide** • 🧾 **Clair** • 🔒 **Sécurisé**",
+      ].join("\n"),
       layout: "select", // "select" | "buttons"
       types: PRESET_CATEGORIES.map((c) => ({ ...c })),
       target_channel_id: null,
-      simple: null, // { enabled, thumb, title, text, footer, category, btnStyle }
+
+      // ✅ NEW: formulaire ON/OFF
+      form_enabled: true,
+
+      // Mode Simple
+      simple: null, // { enabled, thumb, title, text, footer, category, btnStyle, btnLabel }
     };
   }
 
@@ -1935,6 +1960,8 @@ function createTicketsService({ pool, config }) {
     const simpleLine = simpleOn
       ? `✅ **Mode Simple :** ON • **Catégorie :** ${draft.simple?.category || "Support"}`
       : `—`;
+
+    const formLine = draft?.form_enabled ? "✅ Avec" : "❌ Sans";
 
     return new EmbedBuilder()
       .setColor(premiumColor())
@@ -1947,6 +1974,7 @@ function createTicketsService({ pool, config }) {
           `**Layout :** ${draft.layout === "buttons" ? "Boutons (max 5)" : "Select (jusqu’à 25)"}`,
           `**Types :** **${tCount}**`,
           `**Salon cible :** ${draft.target_channel_id ? `<#${draft.target_channel_id}>` : "—"}`,
+          `**Formulaire :** ${formLine}`,
           `**Mode Simple :** ${simpleLine}`,
           "",
           "Utilise les boutons ci-dessous, puis **Aperçu** et **Publier**.",
@@ -1955,13 +1983,20 @@ function createTicketsService({ pool, config }) {
       .setTimestamp();
   }
 
-  function buildPanelBuilderHomeComponents() {
+  function buildPanelBuilderHomeComponents(draft) {
+    const formBtn = new ButtonBuilder()
+      .setCustomId("tpnl:form_toggle")
+      .setLabel(`Formulaire: ${draft?.form_enabled ? "Avec" : "Sans"}`)
+      .setEmoji(draft?.form_enabled ? "✅" : "❌")
+      .setStyle(draft?.form_enabled ? ButtonStyle.Success : ButtonStyle.Danger);
+
     return [
       new ActionRowBuilder().addComponents(
         new ButtonBuilder().setCustomId("tpnl:style").setLabel("Style").setStyle(ButtonStyle.Primary).setEmoji("🎨"),
         new ButtonBuilder().setCustomId("tpnl:types").setLabel("Types").setStyle(ButtonStyle.Secondary).setEmoji("🧩"),
         new ButtonBuilder().setCustomId("tpnl:layout").setLabel("Layout").setStyle(ButtonStyle.Secondary).setEmoji("🧱"),
-        new ButtonBuilder().setCustomId("tpnl:simple").setLabel("Mode Simple").setStyle(ButtonStyle.Secondary).setEmoji("🧊")
+        new ButtonBuilder().setCustomId("tpnl:simple").setLabel("Mode Simple").setStyle(ButtonStyle.Secondary).setEmoji("🧊"),
+        formBtn
       ),
       new ActionRowBuilder().addComponents(
         new ButtonBuilder().setCustomId("tpnl:channel").setLabel("Salon").setStyle(ButtonStyle.Secondary).setEmoji("📍"),
@@ -1979,10 +2014,11 @@ function createTicketsService({ pool, config }) {
     }
 
     const cur = getPanelDraft(interaction.guildId, interaction.user.id) || defaultPanelBuilderDraft(interaction.guild);
+    if (typeof cur.form_enabled !== "boolean") cur.form_enabled = true;
     setPanelDraft(interaction.guildId, interaction.user.id, cur);
 
     const embed = buildPanelBuilderHomeEmbed(interaction.guild, cur);
-    await replyEphemeral(interaction, { embeds: [embed], components: buildPanelBuilderHomeComponents() });
+    await replyEphemeral(interaction, { embeds: [embed], components: buildPanelBuilderHomeComponents(cur) });
     return true;
   }
 
@@ -2018,7 +2054,21 @@ function createTicketsService({ pool, config }) {
     setPanelDraft(interaction.guildId, interaction.user.id, draft);
 
     const embed = buildPanelBuilderHomeEmbed(interaction.guild, draft);
-    await interaction.update({ embeds: [embed], components: buildPanelBuilderHomeComponents(), content: "" }).catch(() => {});
+    await interaction
+      .update({ embeds: [embed], components: buildPanelBuilderHomeComponents(draft), content: "" })
+      .catch(() => {});
+    return true;
+  }
+
+  async function panelBuilderToggleForm(interaction) {
+    const draft = getPanelDraft(interaction.guildId, interaction.user.id) || defaultPanelBuilderDraft(interaction.guild);
+    draft.form_enabled = !Boolean(draft.form_enabled);
+    setPanelDraft(interaction.guildId, interaction.user.id, draft);
+
+    const embed = buildPanelBuilderHomeEmbed(interaction.guild, draft);
+    await interaction
+      .update({ embeds: [embed], components: buildPanelBuilderHomeComponents(draft), content: "" })
+      .catch(() => {});
     return true;
   }
 
@@ -2204,7 +2254,7 @@ function createTicketsService({ pool, config }) {
       .setMaxLength(100)
       .setValue(draft.simple?.category || "Support");
 
-    // ⚠️ Modal = max 5 champs => la couleur bouton est choisie ensuite via select.
+    // ⚠️ Modal = max 5 champs => couleur + texte bouton gérés après la modal.
     modal.addComponents(
       new ActionRowBuilder().addComponents(img),
       new ActionRowBuilder().addComponents(title),
@@ -2215,6 +2265,22 @@ function createTicketsService({ pool, config }) {
 
     await interaction.showModal(modal).catch(() => {});
     return true;
+  }
+
+  async function panelBuilderAskSimpleOptions(interaction) {
+    const row = new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId("tpnl:simple_color_btn").setLabel("Couleur bouton").setStyle(ButtonStyle.Secondary).setEmoji("🎨"),
+      new ButtonBuilder().setCustomId("tpnl:simple_label_btn").setLabel("Texte du bouton").setStyle(ButtonStyle.Secondary).setEmoji("✏️"),
+      new ButtonBuilder().setCustomId("tpnl:home").setLabel("Retour").setStyle(ButtonStyle.Secondary).setEmoji("⬅️")
+    );
+
+    await interaction
+      .followUp({
+        content: "Options Mode Simple :",
+        components: [row],
+        flags: MessageFlags.Ephemeral,
+      })
+      .catch(() => {});
   }
 
   async function panelBuilderAskButtonColor(interaction) {
@@ -2237,6 +2303,26 @@ function createTicketsService({ pool, config }) {
       .catch(() => {});
   }
 
+  async function panelBuilderOpenButtonLabelModal(interaction) {
+    const draft = getPanelDraft(interaction.guildId, interaction.user.id) || defaultPanelBuilderDraft(interaction.guild);
+    const cur = (draft.simple?.btnLabel || "Ouvrir un ticket").slice(0, 80);
+
+    const modal = new ModalBuilder().setCustomId("tpnl:simple_btnlabel_modal").setTitle("Texte du bouton (Simple)");
+
+    const input = new TextInputBuilder()
+      .setCustomId("btn_label")
+      .setLabel("Texte affiché sur le bouton")
+      .setStyle(TextInputStyle.Short)
+      .setRequired(true)
+      .setMaxLength(80)
+      .setValue(cur);
+
+    modal.addComponents(new ActionRowBuilder().addComponents(input));
+
+    await interaction.showModal(modal).catch(() => {});
+    return true;
+  }
+
   function buildSimplePanelFromDraft(guild, draft, forPublishPanelId = null) {
     const s = draft.simple || {};
     const e = new EmbedBuilder()
@@ -2253,9 +2339,11 @@ function createTicketsService({ pool, config }) {
     const value = slugValue(label);
 
     const panelId = forPublishPanelId || "preview";
+    const btnLabel = (s.btnLabel || "Ouvrir un ticket").slice(0, 80);
+
     const btn = new ButtonBuilder()
       .setCustomId(`ticketp:open:${panelId}:${value}:${encodeURIComponent(label)}`)
-      .setLabel("Ouvrir un ticket")
+      .setLabel(btnLabel)
       .setStyle(parseButtonStyle(s.btnStyle || "primary"));
 
     return { embed: e, components: [new ActionRowBuilder().addComponents(btn)], label, value };
@@ -2360,6 +2448,10 @@ function createTicketsService({ pool, config }) {
       const payload = {
         premium: true,
         layout: "simple",
+
+        // ✅ NEW
+        useForm: Boolean(draft.form_enabled),
+
         title: draft.simple?.title || draft.title,
         description: draft.simple?.text || draft.description,
         categories: [{ label: built.label, value: built.value, description: "Mode Simple" }],
@@ -2371,6 +2463,7 @@ function createTicketsService({ pool, config }) {
           footer: draft.simple?.footer || "",
           category: draft.simple?.category || "Support",
           btnStyle: draft.simple?.btnStyle || "primary",
+          btnLabel: draft.simple?.btnLabel || "Ouvrir un ticket",
         },
       };
 
@@ -2393,6 +2486,10 @@ function createTicketsService({ pool, config }) {
     const payload = {
       premium: true,
       layout: draft.layout,
+
+      // ✅ NEW
+      useForm: Boolean(draft.form_enabled),
+
       categories: types,
       title: draft.title,
       description: draft.description,
@@ -2558,16 +2655,38 @@ function createTicketsService({ pool, config }) {
           footer: (footer || "Tickets Premium • Mino Bot").slice(0, 2048),
           category: (category || "Support").slice(0, 100),
           btnStyle: draft.simple?.btnStyle || "primary",
+          btnLabel: (draft.simple?.btnLabel || "Ouvrir un ticket").slice(0, 80),
         };
 
-        // On aligne le draft principal aussi (utile pour cohérence)
+        // Align draft principal (cohérence)
         draft.title = draft.simple.title;
         draft.description = draft.simple.text;
 
         setPanelDraft(interaction.guildId, interaction.user.id, draft);
 
-        await replyEphemeral(interaction, { content: "✅ Mode Simple enregistré. Choisis la couleur du bouton." });
-        await panelBuilderAskButtonColor(interaction);
+        await replyEphemeral(interaction, { content: "✅ Mode Simple enregistré." });
+        // options (couleur + texte bouton)
+        await panelBuilderAskSimpleOptions(interaction);
+        return true;
+      }
+
+      // ✅ NEW: simple button label modal
+      if (interaction.customId === "tpnl:simple_btnlabel_modal") {
+        if (!isAdmin(interaction)) return true;
+
+        const draft = getPanelDraft(interaction.guildId, interaction.user.id) || defaultPanelBuilderDraft(interaction.guild);
+        draft.simple = draft.simple || { enabled: true };
+
+        const label = (interaction.fields.getTextInputValue("btn_label") || "").trim();
+        if (!label) {
+          await replyEphemeral(interaction, { content: "❌ Le texte du bouton est obligatoire." });
+          return true;
+        }
+
+        draft.simple.btnLabel = label.slice(0, 80);
+        setPanelDraft(interaction.guildId, interaction.user.id, draft);
+
+        await replyEphemeral(interaction, { content: `✅ Texte bouton enregistré: **${draft.simple.btnLabel}**` });
         return true;
       }
 
@@ -2622,7 +2741,7 @@ function createTicketsService({ pool, config }) {
         return true;
       }
 
-      // ticket premium submit
+      // ticket premium submit (modal)
       if (interaction.customId.startsWith("ticketp:modal:")) {
         const parts = interaction.customId.split(":");
         const panelId = parts[2];
@@ -2738,28 +2857,40 @@ function createTicketsService({ pool, config }) {
         return true;
       }
 
-      // ticket premium select => modal
+      // ticket premium select => form OR direct
       if (interaction.customId.startsWith("ticketp:select:")) {
         const panelId = interaction.customId.split(":")[2];
         const value = interaction.values?.[0];
 
-        // preview cases (ticket-setup preview OR panel-builder preview)
+        // preview cases
         if (panelId === "preview") {
           const pb = getPanelDraft(interaction.guildId, interaction.user.id);
           const src = pb?.types?.length
             ? pb.types
             : getDraft(interaction.guildId, interaction.user.id)?.types || PRESET_CATEGORIES;
           const found = src.find((c) => c.value === value);
-          return await openPremiumModal(interaction, "preview", value, found?.label || value);
+          const label = found?.label || value || "Support";
+
+          const useForm = await shouldUseFormForPanel("preview", interaction);
+          if (!useForm) {
+            await interaction.deferReply({ flags: MessageFlags.Ephemeral }).catch(() => {});
+            return await createTicket(interaction, label);
+          }
+          return await openPremiumModal(interaction, "preview", value, label);
         }
 
         const panel = await getPanel(panelId);
         const payload = parsePanelPayload(panel?.categories);
 
-        // if the panel was published in simple mode, still stored as categories with 1 item
         const arr = payload?.categories;
         const found = Array.isArray(arr) ? arr.find((c) => c.value === value) : null;
         const label = found?.label || value || "Support";
+
+        const useForm = await shouldUseFormForPanel(panelId, interaction);
+        if (!useForm) {
+          await interaction.deferReply({ flags: MessageFlags.Ephemeral }).catch(() => {});
+          return await createTicket(interaction, label);
+        }
 
         return await openPremiumModal(interaction, panelId, value, label);
       }
@@ -2827,8 +2958,11 @@ function createTicketsService({ pool, config }) {
 
         if (interaction.customId === "tpnl:home") {
           const draft = getPanelDraft(interaction.guildId, interaction.user.id) || defaultPanelBuilderDraft(interaction.guild);
+          if (typeof draft.form_enabled !== "boolean") draft.form_enabled = true;
           const embed = buildPanelBuilderHomeEmbed(interaction.guild, draft);
-          await interaction.update({ embeds: [embed], components: buildPanelBuilderHomeComponents(), content: "" }).catch(() => {});
+          await interaction
+            .update({ embeds: [embed], components: buildPanelBuilderHomeComponents(draft), content: "" })
+            .catch(() => {});
           return true;
         }
 
@@ -2846,16 +2980,36 @@ function createTicketsService({ pool, config }) {
         // ✅ Mode Simple button
         if (interaction.customId === "tpnl:simple") return await panelBuilderOpenSimpleModal(interaction);
 
+        // ✅ NEW: Formulaire toggle
+        if (interaction.customId === "tpnl:form_toggle") return await panelBuilderToggleForm(interaction);
+
+        // ✅ NEW: Mode Simple option buttons
+        if (interaction.customId === "tpnl:simple_color_btn") {
+          await safeDeferUpdate(interaction);
+          await panelBuilderAskButtonColor(interaction);
+          return true;
+        }
+        if (interaction.customId === "tpnl:simple_label_btn") {
+          return await panelBuilderOpenButtonLabelModal(interaction);
+        }
+
         return true;
       }
 
-      // ticket premium button open => modal (published buttons layout OR preview buttons OR simple)
+      // ticket premium button open => form OR direct
       if (interaction.customId.startsWith("ticketp:open:")) {
         const parts = interaction.customId.split(":");
         // ticketp:open:<panelId>:<value>:<labelEncoded>
         const panelId = parts[2];
         const value = parts[3];
         const label = decodeURIComponent(parts.slice(4).join(":") || value);
+
+        const useForm = await shouldUseFormForPanel(panelId, interaction);
+        if (!useForm) {
+          await interaction.deferReply({ flags: MessageFlags.Ephemeral }).catch(() => {});
+          return await createTicket(interaction, label || value || "Support");
+        }
+
         return await openPremiumModal(interaction, panelId, value, label);
       }
 
