@@ -1,13 +1,19 @@
-// tickets.js (FULL) — Premium Setup Wizard + Premium Ticket Panel Builder + Panel Premium (Select/Buttons → Modal → Ticket)
+// tickets.js (FULL) — Premium Setup Wizard + Premium Ticket Panel Builder + Panel Premium (Select/Buttons/Simple → Modal → Ticket)
 // ✅ Conserve: ticket-config, ticket-stats, tout le système ticket:* (claim/close/transcript/delete/feedback)
 // ✅ Ajoute:
 //   - /ticket-setup : wizard premium (config système + publier panel premium)
 //   - /ticket-panel : NOW = interface premium (Panel Builder) + fallback legacy si options fournies
-//   - panels premium: ticketp:select / ticketp:open / ticketp:modal  => Select/Buttons → Modal → Ticket créé
+//   - panels premium: ticketp:select / ticketp:open / ticketp:modal  => Select/Buttons/Simple → Modal → Ticket créé
+// ✅ Ajout demandé:
+//   - Dans /ticket-panel builder: bouton 🧊 Mode Simple
+//     -> ouvre une modal pour: Image droite (thumbnail), Titre, Texte, Footer, Catégorie (libre)
+//     -> puis select couleur du bouton (Bleu/Vert/Rouge/Gris)
+//     -> Aperçu / Publier utilisent automatiquement le Mode Simple si activé
 //
 // Notes:
 // - Fix Discord limit select options <= 25 (helper safeSliceForSelect)
 // - /ticket-panel: si "mode" est fourni => comportement legacy (comme avant). Sinon => builder premium.
+// - Discord modal = max 5 inputs => la couleur bouton est choisie via un select après la modal.
 
 const crypto = require("crypto");
 const {
@@ -111,6 +117,42 @@ function parseCategories(input) {
   }
 
   return out.length ? out : null;
+}
+
+/* ---- Mode Simple helpers ---- */
+
+function slugValue(input) {
+  const s = (input || "support")
+    .toString()
+    .normalize("NFKD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .replace(/[^a-z0-9-]/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-|-$/g, "")
+    .slice(0, 50);
+  return s || "support";
+}
+
+function parseButtonStyle(input) {
+  const raw = (input || "").toString().trim().toLowerCase();
+  if (!raw) return ButtonStyle.Primary;
+
+  if (["primary", "blue", "bleu"].includes(raw)) return ButtonStyle.Primary;
+  if (["success", "green", "vert"].includes(raw)) return ButtonStyle.Success;
+  if (["danger", "red", "rouge"].includes(raw)) return ButtonStyle.Danger;
+  if (["secondary", "grey", "gray", "gris"].includes(raw)) return ButtonStyle.Secondary;
+
+  return ButtonStyle.Primary;
+}
+
+function isValidHttpUrl(url) {
+  try {
+    const u = new URL(url);
+    return u.protocol === "http:" || u.protocol === "https:";
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -494,7 +536,12 @@ function createTicketsService({ pool, config }) {
     .setName("ticket-stats")
     .setDescription("ADMIN: Stats tickets/feedback")
     .addIntegerOption((opt) =>
-      opt.setName("days").setDescription("Période en jours (défaut 30)").setRequired(false).setMinValue(1).setMaxValue(365)
+      opt
+        .setName("days")
+        .setDescription("Période en jours (défaut 30)")
+        .setRequired(false)
+        .setMinValue(1)
+        .setMaxValue(365)
     );
 
   const ticketSetupCmd = new SlashCommandBuilder()
@@ -597,7 +644,8 @@ function createTicketsService({ pool, config }) {
     const mode = interaction.options.getString("mode", true);
     const title = interaction.options.getString("titre") || "🎫 Ouvrir un ticket";
     const desc =
-      interaction.options.getString("description") || "Clique pour créer un ticket. Un staff te répondra dès que possible.";
+      interaction.options.getString("description") ||
+      "Clique pour créer un ticket. Un staff te répondra dès que possible.";
 
     const targetChannel = interaction.options.getChannel("salon") || interaction.channel;
     if (!targetChannel || !targetChannel.isTextBased?.()) {
@@ -616,7 +664,10 @@ function createTicketsService({ pool, config }) {
 
       components = [
         new ActionRowBuilder().addComponents(
-          new ButtonBuilder().setCustomId(`ticket:open:${panelId}`).setLabel("Ouvrir un ticket").setStyle(ButtonStyle.Primary)
+          new ButtonBuilder()
+            .setCustomId(`ticket:open:${panelId}`)
+            .setLabel("Ouvrir un ticket")
+            .setStyle(ButtonStyle.Primary)
         ),
       ];
     } else {
@@ -633,19 +684,35 @@ function createTicketsService({ pool, config }) {
 
       components = [
         new ActionRowBuilder().addComponents(
-          new StringSelectMenuBuilder().setCustomId(`ticket:select:${panelId}`).setPlaceholder("Choisis une raison…").addOptions(opts)
+          new StringSelectMenuBuilder()
+            .setCustomId(`ticket:select:${panelId}`)
+            .setPlaceholder("Choisis une raison…")
+            .addOptions(opts)
         ),
       ];
     }
 
-    const embed = new EmbedBuilder().setTitle(title).setDescription(desc).setFooter({ text: `Panel ID: ${panelId}` }).setTimestamp();
+    const embed = new EmbedBuilder()
+      .setTitle(title)
+      .setDescription(desc)
+      .setFooter({ text: `Panel ID: ${panelId}` })
+      .setTimestamp();
+
     const msg = await targetChannel.send({ embeds: [embed], components });
 
     await pool.query(
       `INSERT INTO ticket_panels (panel_id, guild_id, channel_id, message_id, mode, categories, created_by)
        VALUES ($1,$2,$3,$4,$5,$6,$7)
        ON CONFLICT (panel_id) DO NOTHING`,
-      [panelId, interaction.guildId, msg.channel.id, msg.id, mode, modePayload ? JSON.stringify(modePayload) : null, interaction.user.id]
+      [
+        panelId,
+        interaction.guildId,
+        msg.channel.id,
+        msg.id,
+        mode,
+        modePayload ? JSON.stringify(modePayload) : null,
+        interaction.user.id,
+      ]
     );
 
     await replyEphemeral(interaction, { content: `✅ Panel posté dans <#${msg.channel.id}>.` });
@@ -701,7 +768,9 @@ function createTicketsService({ pool, config }) {
 
     const settings = await getSettings(guild.id);
     if (!settings.category_id) {
-      await replyEphemeral(interaction, { content: "⚠️ Catégorie tickets non configurée. Fais `/ticket-config set category:...`." });
+      await replyEphemeral(interaction, {
+        content: "⚠️ Catégorie tickets non configurée. Fais `/ticket-config set category:...`.",
+      });
       return true;
     }
 
@@ -773,7 +842,9 @@ function createTicketsService({ pool, config }) {
         reason: "Ticket created",
       });
     } catch {
-      await replyEphemeral(interaction, { content: "⚠️ Impossible de créer le salon ticket (permissions/catégorie invalide)." });
+      await replyEphemeral(interaction, {
+        content: "⚠️ Impossible de créer le salon ticket (permissions/catégorie invalide).",
+      });
       return true;
     }
 
@@ -835,7 +906,10 @@ function createTicketsService({ pool, config }) {
   }
 
   async function getPanel(panelId) {
-    const res = await pool.query(`SELECT panel_id, mode, categories FROM ticket_panels WHERE panel_id=$1 LIMIT 1`, [panelId]);
+    const res = await pool.query(
+      `SELECT panel_id, mode, categories FROM ticket_panels WHERE panel_id=$1 LIMIT 1`,
+      [panelId]
+    );
     return res.rows[0] || null;
   }
 
@@ -871,7 +945,9 @@ function createTicketsService({ pool, config }) {
 
     if (finalClaimedBy) {
       await channel.permissionOverwrites.edit(settings.staff_role_id, { SendMessages: false }).catch(() => {});
-      await channel.permissionOverwrites.edit(finalClaimedBy, { SendMessages: true, ViewChannel: true }).catch(() => {});
+      await channel.permissionOverwrites
+        .edit(finalClaimedBy, { SendMessages: true, ViewChannel: true })
+        .catch(() => {});
     } else {
       await channel.permissionOverwrites.edit(settings.staff_role_id, { SendMessages: true }).catch(() => {});
     }
@@ -913,7 +989,9 @@ function createTicketsService({ pool, config }) {
         if (upd.rowCount === 0) {
           const latest = await getTicket(ticketId);
           await safeFollowUpEphemeral(interaction, {
-            content: latest?.claimed_by ? `⚠️ Déjà pris en charge par <@${latest.claimed_by}>.` : "⚠️ Impossible de claim (réessaie).",
+            content: latest?.claimed_by
+              ? `⚠️ Déjà pris en charge par <@${latest.claimed_by}>.`
+              : "⚠️ Impossible de claim (réessaie).",
           });
           return true;
         }
@@ -929,7 +1007,9 @@ function createTicketsService({ pool, config }) {
         if (upd.rowCount === 0) {
           const latest = await getTicket(ticketId);
           await safeFollowUpEphemeral(interaction, {
-            content: latest?.claimed_by ? `⚠️ Déjà pris en charge par <@${latest.claimed_by}>.` : "⚠️ Déjà non pris en charge.",
+            content: latest?.claimed_by
+              ? `⚠️ Déjà pris en charge par <@${latest.claimed_by}>.`
+              : "⚠️ Déjà non pris en charge.",
           });
           return true;
         }
@@ -1010,9 +1090,12 @@ function createTicketsService({ pool, config }) {
       .setColor(premiumColor())
       .setTitle("⭐ Feedback ticket")
       .setDescription(
-        ["Ton ticket vient d’être fermé.", "Clique sur une note (1 à 5) puis envoie un commentaire (facultatif).", "", "ℹ️ Visible **uniquement par les admins**."].join(
-          "\n"
-        )
+        [
+          "Ton ticket vient d’être fermé.",
+          "Clique sur une note (1 à 5) puis envoie un commentaire (facultatif).",
+          "",
+          "ℹ️ Visible **uniquement par les admins**.",
+        ].join("\n")
       )
       .setFooter({ text: `Ticket ID: ${ticketId}` })
       .setTimestamp();
@@ -1031,7 +1114,9 @@ function createTicketsService({ pool, config }) {
     }
 
     if (interaction.channel?.isTextBased?.()) {
-      await interaction.channel.send({ content: `<@${ticketRow.opener_id}>`, embeds: [embed], components: [row] }).catch(() => {});
+      await interaction.channel
+        .send({ content: `<@${ticketRow.opener_id}>`, embeds: [embed], components: [row] })
+        .catch(() => {});
     }
   }
 
@@ -1055,10 +1140,14 @@ function createTicketsService({ pool, config }) {
         return true;
       }
 
-      await pool.query(`UPDATE tickets SET status='closed', closed_at=NOW() WHERE ticket_id=$1 AND status='open'`, [ticketId]);
+      await pool.query(`UPDATE tickets SET status='closed', closed_at=NOW() WHERE ticket_id=$1 AND status='open'`, [
+        ticketId,
+      ]);
 
       if (interaction.channel) {
-        await interaction.channel.permissionOverwrites.edit(ticket.opener_id, { SendMessages: false, ViewChannel: true }).catch(() => {});
+        await interaction.channel.permissionOverwrites
+          .edit(ticket.opener_id, { SendMessages: false, ViewChannel: true })
+          .catch(() => {});
       }
 
       await safeChannelSend(interaction.channel, `🔒 Ticket fermé par <@${interaction.user.id}>.`);
@@ -1202,7 +1291,9 @@ function createTicketsService({ pool, config }) {
       }
 
       if (!content) {
-        await safeFollowUpEphemeral(interaction, { content: "⚠️ Transcript indisponible (salon supprimé et pas de transcript en DB)." });
+        await safeFollowUpEphemeral(interaction, {
+          content: "⚠️ Transcript indisponible (salon supprimé et pas de transcript en DB).",
+        });
         return true;
       }
 
@@ -1252,7 +1343,9 @@ function createTicketsService({ pool, config }) {
 
     const r = clamp(Number(rating || 0), 1, 5);
 
-    const modal = new ModalBuilder().setCustomId(`ticket:comment:${ticketId}:${r}`).setTitle(`Feedback (${r}/5) - Commentaire (facultatif)`);
+    const modal = new ModalBuilder()
+      .setCustomId(`ticket:comment:${ticketId}:${r}`)
+      .setTitle(`Feedback (${r}/5) - Commentaire (facultatif)`);
 
     const input = new TextInputBuilder()
       .setCustomId("comment")
@@ -1301,7 +1394,10 @@ function createTicketsService({ pool, config }) {
     if (guild) {
       const adminFeedback = await fetchAdminChannel(guild, settings, "feedback");
       if (adminFeedback) {
-        const fbRes = await pool.query(`SELECT log_channel_id, log_message_id FROM ticket_feedback WHERE ticket_id=$1 LIMIT 1`, [ticketId]);
+        const fbRes = await pool.query(
+          `SELECT log_channel_id, log_message_id FROM ticket_feedback WHERE ticket_id=$1 LIMIT 1`,
+          [ticketId]
+        );
         const fb = fbRes.rows[0] || {};
 
         const embed = new EmbedBuilder()
@@ -1415,7 +1511,9 @@ function createTicketsService({ pool, config }) {
           "",
           `**Catégorie tickets :** ${settings.category_id ? `<#${settings.category_id}>` : "❌ Non définie"}`,
           `**Rôle staff :** ${settings.staff_role_id ? `<@&${settings.staff_role_id}>` : "❌ Non défini"}`,
-          `**Salon feedback/transcripts :** ${settings.admin_feedback_channel_id ? `<#${settings.admin_feedback_channel_id}>` : "—"}`,
+          `**Salon feedback/transcripts :** ${
+            settings.admin_feedback_channel_id ? `<#${settings.admin_feedback_channel_id}>` : "—"
+          }`,
           "",
           `**Types (menu) :** **${types}**`,
           "",
@@ -1558,7 +1656,8 @@ function createTicketsService({ pool, config }) {
   async function setupTypes(interaction) {
     if (!isAdmin(interaction)) return true;
 
-    const draft = getDraft(interaction.guildId, interaction.user.id) || { types: PRESET_CATEGORIES.map((c) => ({ ...c })) };
+    const draft =
+      getDraft(interaction.guildId, interaction.user.id) || { types: PRESET_CATEGORIES.map((c) => ({ ...c })) };
     setDraft(interaction.guildId, interaction.user.id, draft);
 
     const list =
@@ -1571,7 +1670,15 @@ function createTicketsService({ pool, config }) {
       .setColor(premiumColor())
       .setAuthor(buildPremiumAuthor(interaction.guild))
       .setTitle("🧩 Types de tickets (menu)")
-      .setDescription(["Ces types apparaissent dans le panel premium (Select).", "", list, "", "➕ Ajouter / ✏️ Modifier / 🗑️ Supprimer via les boutons."].join("\n"))
+      .setDescription(
+        [
+          "Ces types apparaissent dans le panel premium (Select).",
+          "",
+          list,
+          "",
+          "➕ Ajouter / ✏️ Modifier / 🗑️ Supprimer via les boutons.",
+        ].join("\n")
+      )
       .setTimestamp();
 
     const row = new ActionRowBuilder().addComponents(
@@ -1664,7 +1771,8 @@ function createTicketsService({ pool, config }) {
   }
 
   async function setupPreview(interaction) {
-    const draft = getDraft(interaction.guildId, interaction.user.id) || { types: PRESET_CATEGORIES.map((c) => ({ ...c })) };
+    const draft =
+      getDraft(interaction.guildId, interaction.user.id) || { types: PRESET_CATEGORIES.map((c) => ({ ...c })) };
 
     const embed = buildPremiumPanelEmbed({
       guild: interaction.guild,
@@ -1676,12 +1784,14 @@ function createTicketsService({ pool, config }) {
       .setCustomId("ticketp:select:preview")
       .setPlaceholder("Choisis une catégorie…")
       .addOptions(
-        safeSliceForSelect((draft.types || PRESET_CATEGORIES).map((c) => ({
-          label: c.label,
-          value: c.value,
-          description: c.description,
-          emoji: c.emoji || undefined,
-        })))
+        safeSliceForSelect(
+          (draft.types || PRESET_CATEGORIES).map((c) => ({
+            label: c.label,
+            value: c.value,
+            description: c.description,
+            emoji: c.emoji || undefined,
+          }))
+        )
       );
 
     await interaction
@@ -1729,11 +1839,15 @@ function createTicketsService({ pool, config }) {
 
     const settings = await getSettings(guild.id);
     if (!settings.category_id) {
-      await replyEphemeral(interaction, { content: "⚠️ Configure d’abord la catégorie tickets (/ticket-config set category:...)" });
+      await replyEphemeral(interaction, {
+        content: "⚠️ Configure d’abord la catégorie tickets (/ticket-config set category:...)",
+      });
       return true;
     }
 
-    const draft = draftOverride || getDraft(guild.id, interaction.user.id) || { types: PRESET_CATEGORIES.map((c) => ({ ...c })) };
+    const draft =
+      draftOverride ||
+      getDraft(guild.id, interaction.user.id) || { types: PRESET_CATEGORIES.map((c) => ({ ...c })) };
     const types = draft.types?.length ? draft.types : PRESET_CATEGORIES;
 
     const panelId = crypto.randomUUID();
@@ -1745,12 +1859,14 @@ function createTicketsService({ pool, config }) {
       .setCustomId(`ticketp:select:${panelId}`)
       .setPlaceholder("Choisis une catégorie…")
       .addOptions(
-        safeSliceForSelect(types.map((c) => ({
-          label: c.label,
-          value: c.value,
-          description: c.description,
-          emoji: c.emoji || undefined,
-        })))
+        safeSliceForSelect(
+          types.map((c) => ({
+            label: c.label,
+            value: c.value,
+            description: c.description,
+            emoji: c.emoji || undefined,
+          }))
+        )
       );
 
     const msg = await ch.send({ embeds: [embed], components: [new ActionRowBuilder().addComponents(menu)] });
@@ -1766,7 +1882,7 @@ function createTicketsService({ pool, config }) {
     return true;
   }
 
-  /* ---------------- Premium ticket: Select/Buttons -> Modal -> Create ---------------- */
+  /* ---------------- Premium ticket: Select/Buttons/Simple -> Modal -> Create ---------------- */
 
   async function openPremiumModal(interaction, panelId, selectedValue, label) {
     const modal = new ModalBuilder()
@@ -1803,19 +1919,23 @@ function createTicketsService({ pool, config }) {
   function defaultPanelBuilderDraft(guild) {
     return {
       title: `🎫 ${guild?.name || "Support"} • Ticket Center`,
-      description: [
-        "Sélectionne une catégorie puis remplis le formulaire.",
-        "",
-        "✅ **Rapide** • 🧾 **Clair** • 🔒 **Sécurisé**",
-      ].join("\n"),
+      description: ["Sélectionne une catégorie puis remplis le formulaire.", "", "✅ **Rapide** • 🧾 **Clair** • 🔒 **Sécurisé**"].join(
+        "\n"
+      ),
       layout: "select", // "select" | "buttons"
       types: PRESET_CATEGORIES.map((c) => ({ ...c })),
-      target_channel_id: null, // set at publish step
+      target_channel_id: null,
+      simple: null, // { enabled, thumb, title, text, footer, category, btnStyle }
     };
   }
 
   function buildPanelBuilderHomeEmbed(guild, draft) {
     const tCount = draft?.types?.length || 0;
+    const simpleOn = Boolean(draft?.simple?.enabled);
+    const simpleLine = simpleOn
+      ? `✅ **Mode Simple :** ON • **Catégorie :** ${draft.simple?.category || "Support"}`
+      : `—`;
+
     return new EmbedBuilder()
       .setColor(premiumColor())
       .setAuthor(buildPremiumAuthor(guild))
@@ -1827,6 +1947,7 @@ function createTicketsService({ pool, config }) {
           `**Layout :** ${draft.layout === "buttons" ? "Boutons (max 5)" : "Select (jusqu’à 25)"}`,
           `**Types :** **${tCount}**`,
           `**Salon cible :** ${draft.target_channel_id ? `<#${draft.target_channel_id}>` : "—"}`,
+          `**Mode Simple :** ${simpleLine}`,
           "",
           "Utilise les boutons ci-dessous, puis **Aperçu** et **Publier**.",
         ].join("\n")
@@ -1839,7 +1960,8 @@ function createTicketsService({ pool, config }) {
       new ActionRowBuilder().addComponents(
         new ButtonBuilder().setCustomId("tpnl:style").setLabel("Style").setStyle(ButtonStyle.Primary).setEmoji("🎨"),
         new ButtonBuilder().setCustomId("tpnl:types").setLabel("Types").setStyle(ButtonStyle.Secondary).setEmoji("🧩"),
-        new ButtonBuilder().setCustomId("tpnl:layout").setLabel("Layout").setStyle(ButtonStyle.Secondary).setEmoji("🧱")
+        new ButtonBuilder().setCustomId("tpnl:layout").setLabel("Layout").setStyle(ButtonStyle.Secondary).setEmoji("🧱"),
+        new ButtonBuilder().setCustomId("tpnl:simple").setLabel("Mode Simple").setStyle(ButtonStyle.Secondary).setEmoji("🧊")
       ),
       new ActionRowBuilder().addComponents(
         new ButtonBuilder().setCustomId("tpnl:channel").setLabel("Salon").setStyle(ButtonStyle.Secondary).setEmoji("📍"),
@@ -2035,7 +2157,116 @@ function createTicketsService({ pool, config }) {
     return true;
   }
 
+  /* ---- Mode Simple (builder) ---- */
+
+  async function panelBuilderOpenSimpleModal(interaction) {
+    const draft = getPanelDraft(interaction.guildId, interaction.user.id) || defaultPanelBuilderDraft(interaction.guild);
+
+    const modal = new ModalBuilder().setCustomId("tpnl:simple_modal").setTitle("Mode Simple • Panel");
+
+    const img = new TextInputBuilder()
+      .setCustomId("thumb")
+      .setLabel("Image à droite (URL)")
+      .setStyle(TextInputStyle.Short)
+      .setRequired(false)
+      .setMaxLength(300)
+      .setValue(draft.simple?.thumb || "");
+
+    const title = new TextInputBuilder()
+      .setCustomId("title")
+      .setLabel("Titre")
+      .setStyle(TextInputStyle.Short)
+      .setRequired(true)
+      .setMaxLength(256)
+      .setValue((draft.simple?.title || draft.title || "🎫 Ticket Center").slice(0, 256));
+
+    const text = new TextInputBuilder()
+      .setCustomId("text")
+      .setLabel("Texte")
+      .setStyle(TextInputStyle.Paragraph)
+      .setRequired(true)
+      .setMaxLength(1500)
+      .setValue((draft.simple?.text || draft.description || "Clique pour ouvrir un ticket.").slice(0, 1500));
+
+    const footer = new TextInputBuilder()
+      .setCustomId("footer")
+      .setLabel("Footer")
+      .setStyle(TextInputStyle.Short)
+      .setRequired(false)
+      .setMaxLength(2048)
+      .setValue(draft.simple?.footer || "Tickets Premium • Mino Bot");
+
+    const cat = new TextInputBuilder()
+      .setCustomId("category")
+      .setLabel("Catégorie (libre)")
+      .setStyle(TextInputStyle.Short)
+      .setRequired(true)
+      .setMaxLength(100)
+      .setValue(draft.simple?.category || "Support");
+
+    // ⚠️ Modal = max 5 champs => la couleur bouton est choisie ensuite via select.
+    modal.addComponents(
+      new ActionRowBuilder().addComponents(img),
+      new ActionRowBuilder().addComponents(title),
+      new ActionRowBuilder().addComponents(text),
+      new ActionRowBuilder().addComponents(footer),
+      new ActionRowBuilder().addComponents(cat)
+    );
+
+    await interaction.showModal(modal).catch(() => {});
+    return true;
+  }
+
+  async function panelBuilderAskButtonColor(interaction) {
+    const menu = new StringSelectMenuBuilder()
+      .setCustomId("tpnl:simple_color")
+      .setPlaceholder("Choisis la couleur du bouton…")
+      .addOptions([
+        { label: "Bleu (Primary)", value: "primary", emoji: "🔵" },
+        { label: "Vert (Success)", value: "success", emoji: "🟢" },
+        { label: "Rouge (Danger)", value: "danger", emoji: "🔴" },
+        { label: "Gris (Secondary)", value: "secondary", emoji: "⚪" },
+      ]);
+
+    await interaction
+      .followUp({
+        content: "🎨 Couleur du bouton :",
+        components: [new ActionRowBuilder().addComponents(menu)],
+        flags: MessageFlags.Ephemeral,
+      })
+      .catch(() => {});
+  }
+
+  function buildSimplePanelFromDraft(guild, draft, forPublishPanelId = null) {
+    const s = draft.simple || {};
+    const e = new EmbedBuilder()
+      .setColor(premiumColor())
+      .setAuthor(buildPremiumAuthor(guild))
+      .setTitle((s.title || draft.title || "🎫 Ticket Center").slice(0, 256))
+      .setDescription((s.text || draft.description || "Clique pour ouvrir un ticket.").slice(0, 1500))
+      .setFooter({ text: (s.footer || "Tickets Premium • Mino Bot").slice(0, 2048) })
+      .setTimestamp();
+
+    if (s.thumb && isValidHttpUrl(s.thumb)) e.setThumbnail(s.thumb);
+
+    const label = (s.category || "Support").slice(0, 100);
+    const value = slugValue(label);
+
+    const panelId = forPublishPanelId || "preview";
+    const btn = new ButtonBuilder()
+      .setCustomId(`ticketp:open:${panelId}:${value}:${encodeURIComponent(label)}`)
+      .setLabel("Ouvrir un ticket")
+      .setStyle(parseButtonStyle(s.btnStyle || "primary"));
+
+    return { embed: e, components: [new ActionRowBuilder().addComponents(btn)], label, value };
+  }
+
   function buildPanelFromDraft(guild, draft) {
+    // Mode Simple ON => force 1 bouton + embed custom
+    if (draft?.simple?.enabled) {
+      return buildSimplePanelFromDraft(guild, draft, null);
+    }
+
     const embed = buildPremiumPanelEmbed({ guild, title: draft.title, description: draft.description });
 
     const types = draft.types?.length ? draft.types : PRESET_CATEGORIES;
@@ -2062,12 +2293,14 @@ function createTicketsService({ pool, config }) {
       .setCustomId("ticketp:select:preview")
       .setPlaceholder("Choisis une catégorie…")
       .addOptions(
-        safeSliceForSelect(types.map((t) => ({
-          label: t.label,
-          value: t.value,
-          description: t.description,
-          emoji: t.emoji || undefined,
-        })))
+        safeSliceForSelect(
+          types.map((t) => ({
+            label: t.label,
+            value: t.value,
+            description: t.description,
+            emoji: t.emoji || undefined,
+          }))
+        )
       );
 
     return { embed, components: [new ActionRowBuilder().addComponents(menu)], types };
@@ -2075,13 +2308,13 @@ function createTicketsService({ pool, config }) {
 
   async function panelBuilderPreview(interaction) {
     const draft = getPanelDraft(interaction.guildId, interaction.user.id) || defaultPanelBuilderDraft(interaction.guild);
-    const { embed, components } = buildPanelFromDraft(interaction.guild, draft);
+    const built = buildPanelFromDraft(interaction.guild, draft);
 
     await interaction
       .reply({
-        content: "👁️ Aperçu du panel (builder) :",
-        embeds: [embed],
-        components,
+        content: draft?.simple?.enabled ? "👁️ Aperçu du panel (Mode Simple) :" : "👁️ Aperçu du panel (builder) :",
+        embeds: [built.embed],
+        components: built.components,
         flags: MessageFlags.Ephemeral,
       })
       .catch(() => {});
@@ -2093,13 +2326,20 @@ function createTicketsService({ pool, config }) {
     const channelId = draft.target_channel_id;
 
     if (!channelId) {
-      await interaction.reply({ content: "⚠️ Choisis d’abord un salon (bouton **Salon**).", flags: MessageFlags.Ephemeral }).catch(() => {});
+      await interaction
+        .reply({ content: "⚠️ Choisis d’abord un salon (bouton **Salon**).", flags: MessageFlags.Ephemeral })
+        .catch(() => {});
       return true;
     }
 
     const settings = await getSettings(interaction.guildId);
     if (!settings.category_id) {
-      await interaction.reply({ content: "⚠️ Configure d’abord la catégorie tickets via `/ticket-config set category:...`.", flags: MessageFlags.Ephemeral }).catch(() => {});
+      await interaction
+        .reply({
+          content: "⚠️ Configure d’abord la catégorie tickets via `/ticket-config set category:...`.",
+          flags: MessageFlags.Ephemeral,
+        })
+        .catch(() => {});
       return true;
     }
 
@@ -2110,8 +2350,45 @@ function createTicketsService({ pool, config }) {
       return true;
     }
 
-    const types = draft.types?.length ? draft.types : PRESET_CATEGORIES;
     const panelId = crypto.randomUUID();
+
+    // Mode Simple publish
+    if (draft?.simple?.enabled) {
+      const built = buildSimplePanelFromDraft(guild, draft, panelId);
+      const msg = await ch.send({ embeds: [built.embed], components: built.components });
+
+      const payload = {
+        premium: true,
+        layout: "simple",
+        title: draft.simple?.title || draft.title,
+        description: draft.simple?.text || draft.description,
+        categories: [{ label: built.label, value: built.value, description: "Mode Simple" }],
+        simple: {
+          enabled: true,
+          thumb: draft.simple?.thumb || "",
+          title: draft.simple?.title || "",
+          text: draft.simple?.text || "",
+          footer: draft.simple?.footer || "",
+          category: draft.simple?.category || "Support",
+          btnStyle: draft.simple?.btnStyle || "primary",
+        },
+      };
+
+      await pool.query(
+        `INSERT INTO ticket_panels (panel_id, guild_id, channel_id, message_id, mode, categories, created_by)
+         VALUES ($1,$2,$3,$4,$5,$6,$7)
+         ON CONFLICT (panel_id) DO NOTHING`,
+        [panelId, guild.id, msg.channel.id, msg.id, "premium", JSON.stringify(payload), interaction.user.id]
+      );
+
+      await interaction
+        .reply({ content: `✅ Panel (Mode Simple) publié dans <#${msg.channel.id}>.`, flags: MessageFlags.Ephemeral })
+        .catch(() => {});
+      return true;
+    }
+
+    // Normal builder publish (select/buttons)
+    const types = draft.types?.length ? draft.types : PRESET_CATEGORIES;
 
     const payload = {
       premium: true,
@@ -2145,12 +2422,14 @@ function createTicketsService({ pool, config }) {
         .setCustomId(`ticketp:select:${panelId}`)
         .setPlaceholder("Choisis une catégorie…")
         .addOptions(
-          safeSliceForSelect(types.map((t) => ({
-            label: t.label,
-            value: t.value,
-            description: t.description,
-            emoji: t.emoji || undefined,
-          })))
+          safeSliceForSelect(
+            types.map((t) => ({
+              label: t.label,
+              value: t.value,
+              description: t.description,
+              emoji: t.emoji || undefined,
+            }))
+          )
         );
       components = [new ActionRowBuilder().addComponents(menu)];
     }
@@ -2164,7 +2443,9 @@ function createTicketsService({ pool, config }) {
       [panelId, guild.id, msg.channel.id, msg.id, "premium", JSON.stringify(payload), interaction.user.id]
     );
 
-    await interaction.reply({ content: `✅ Panel publié dans <#${msg.channel.id}>.`, flags: MessageFlags.Ephemeral }).catch(() => {});
+    await interaction
+      .reply({ content: `✅ Panel publié dans <#${msg.channel.id}>.`, flags: MessageFlags.Ephemeral })
+      .catch(() => {});
     return true;
   }
 
@@ -2254,6 +2535,39 @@ function createTicketsService({ pool, config }) {
         setPanelDraft(interaction.guildId, interaction.user.id, draft);
 
         await replyEphemeral(interaction, { content: "✅ Style mis à jour." });
+        return true;
+      }
+
+      // /ticket-panel builder MODE SIMPLE modal
+      if (interaction.customId === "tpnl:simple_modal") {
+        if (!isAdmin(interaction)) return true;
+
+        const draft = getPanelDraft(interaction.guildId, interaction.user.id) || defaultPanelBuilderDraft(interaction.guild);
+
+        const thumbRaw = (interaction.fields.getTextInputValue("thumb") || "").trim();
+        const title = (interaction.fields.getTextInputValue("title") || "").trim();
+        const text = (interaction.fields.getTextInputValue("text") || "").trim();
+        const footer = (interaction.fields.getTextInputValue("footer") || "").trim();
+        const category = (interaction.fields.getTextInputValue("category") || "").trim();
+
+        draft.simple = {
+          enabled: true,
+          thumb: thumbRaw && isValidHttpUrl(thumbRaw) ? thumbRaw : "",
+          title: (title || "🎫 Ticket Center").slice(0, 256),
+          text: (text || "Clique pour ouvrir un ticket.").slice(0, 1500),
+          footer: (footer || "Tickets Premium • Mino Bot").slice(0, 2048),
+          category: (category || "Support").slice(0, 100),
+          btnStyle: draft.simple?.btnStyle || "primary",
+        };
+
+        // On aligne le draft principal aussi (utile pour cohérence)
+        draft.title = draft.simple.title;
+        draft.description = draft.simple.text;
+
+        setPanelDraft(interaction.guildId, interaction.user.id, draft);
+
+        await replyEphemeral(interaction, { content: "✅ Mode Simple enregistré. Choisis la couleur du bouton." });
+        await panelBuilderAskButtonColor(interaction);
         return true;
       }
 
@@ -2391,6 +2705,20 @@ function createTicketsService({ pool, config }) {
         await replyEphemeral(interaction, { content: "✅ Salon cible mis à jour." });
         return true;
       }
+
+      // mode simple: choose button color
+      if (interaction.customId === "tpnl:simple_color") {
+        if (!isAdmin(interaction)) return true;
+        const v = interaction.values?.[0] || "primary";
+        const draft = getPanelDraft(interaction.guildId, interaction.user.id) || defaultPanelBuilderDraft(interaction.guild);
+        draft.simple = draft.simple || { enabled: true };
+        draft.simple.enabled = true;
+        draft.simple.btnStyle = v;
+        setPanelDraft(interaction.guildId, interaction.user.id, draft);
+        await replyEphemeral(interaction, { content: `✅ Couleur bouton enregistrée: **${v}**.` });
+        return true;
+      }
+
       if (interaction.customId === "tpnl:pick_edit") {
         if (!isAdmin(interaction)) return true;
         const v = interaction.values?.[0];
@@ -2417,15 +2745,18 @@ function createTicketsService({ pool, config }) {
 
         // preview cases (ticket-setup preview OR panel-builder preview)
         if (panelId === "preview") {
-          // try panel builder first
           const pb = getPanelDraft(interaction.guildId, interaction.user.id);
-          const src = pb?.types?.length ? pb.types : (getDraft(interaction.guildId, interaction.user.id)?.types || PRESET_CATEGORIES);
+          const src = pb?.types?.length
+            ? pb.types
+            : getDraft(interaction.guildId, interaction.user.id)?.types || PRESET_CATEGORIES;
           const found = src.find((c) => c.value === value);
           return await openPremiumModal(interaction, "preview", value, found?.label || value);
         }
 
         const panel = await getPanel(panelId);
         const payload = parsePanelPayload(panel?.categories);
+
+        // if the panel was published in simple mode, still stored as categories with 1 item
         const arr = payload?.categories;
         const found = Array.isArray(arr) ? arr.find((c) => c.value === value) : null;
         const label = found?.label || value || "Support";
@@ -2512,10 +2843,13 @@ function createTicketsService({ pool, config }) {
         if (interaction.customId === "tpnl:type_edit") return await panelBuilderPickType(interaction, "edit");
         if (interaction.customId === "tpnl:type_del") return await panelBuilderPickType(interaction, "del");
 
+        // ✅ Mode Simple button
+        if (interaction.customId === "tpnl:simple") return await panelBuilderOpenSimpleModal(interaction);
+
         return true;
       }
 
-      // ticket premium button open => modal (published buttons layout OR preview buttons)
+      // ticket premium button open => modal (published buttons layout OR preview buttons OR simple)
       if (interaction.customId.startsWith("ticketp:open:")) {
         const parts = interaction.customId.split(":");
         // ticketp:open:<panelId>:<value>:<labelEncoded>
@@ -2587,8 +2921,16 @@ function createTicketsService({ pool, config }) {
           .addFields(
             { name: "Category", value: s.category_id ? `<#${s.category_id}>` : "—" },
             { name: "Staff role", value: s.staff_role_id ? `<@&${s.staff_role_id}>` : "—", inline: true },
-            { name: "Admin feedback channel", value: s.admin_feedback_channel_id ? `<#${s.admin_feedback_channel_id}>` : "—", inline: true },
-            { name: "Transcript channel", value: s.transcript_channel_id ? `<#${s.transcript_channel_id}>` : "—", inline: true },
+            {
+              name: "Admin feedback channel",
+              value: s.admin_feedback_channel_id ? `<#${s.admin_feedback_channel_id}>` : "—",
+              inline: true,
+            },
+            {
+              name: "Transcript channel",
+              value: s.transcript_channel_id ? `<#${s.transcript_channel_id}>` : "—",
+              inline: true,
+            },
             { name: "Max open/user", value: String(s.max_open_per_user), inline: true },
             { name: "Cooldown", value: `${Math.floor(s.cooldown_seconds / 60)} min`, inline: true },
             { name: "Claim exclusif", value: s.claim_exclusive ? "✅" : "❌", inline: true },
