@@ -1,4 +1,9 @@
-// tickets.js
+// tickets.js (UPGRADE PREMIUM WIZARD + PANEL PREMIUM)
+// Basé sur TON code (conserve ticket-panel / ticket-config / ticket-stats + ticket:* handlers)
+// Ajoute:
+// - /ticket-setup (wizard premium côté admin)
+// - panel premium (ticketp:select / ticketp:open / ticketp:modal) => Select -> Modal -> Ticket créé
+
 const crypto = require("crypto");
 const {
   SlashCommandBuilder,
@@ -266,12 +271,44 @@ async function tryRenameTicketChannel(channel, newName) {
   await channel.setName(newName).catch(() => {});
 }
 
+/* ---------------- Premium UI Helpers ---------------- */
+
+function premiumColor() {
+  return 0xff2d2d; // rouge luxe
+}
+function buildPremiumAuthor(guild) {
+  return {
+    name: `${guild?.name || "Serveur"} • Ticket Center`,
+    iconURL: guild?.iconURL?.({ size: 128 }) ?? undefined,
+  };
+}
+
+function buildPremiumPanelEmbed({ guild, title, description }) {
+  return new EmbedBuilder()
+    .setColor(premiumColor())
+    .setAuthor(buildPremiumAuthor(guild))
+    .setTitle(title || "🎫 Support Center")
+    .setDescription(
+      description ||
+        [
+          "Sélectionne une catégorie pour ouvrir un ticket.",
+          "",
+          "✅ **Process premium** : *Catégorie → Formulaire → Ticket créé*",
+          "⚠️ Merci d’être précis pour une réponse rapide.",
+        ].join("\n")
+    )
+    .setFooter({ text: "Tickets Premium • Mino Bot" })
+    .setTimestamp();
+}
+
 /* ---------------- Ticket UI ---------------- */
 
-function buildTicketEmbed({ openerId, categoryLabel, ticketId, claimedBy }) {
+function buildTicketEmbed({ openerId, categoryLabel, ticketId, claimedBy, subject, details, guild }) {
   const priseEnCharge = claimedBy ? `<@${claimedBy}>` : "Non pris en charge.";
 
-  return new EmbedBuilder()
+  const e = new EmbedBuilder()
+    .setColor(premiumColor())
+    .setAuthor(buildPremiumAuthor(guild))
     .setTitle("🎫 Ticket créé")
     .setDescription(
       [
@@ -284,6 +321,11 @@ function buildTicketEmbed({ openerId, categoryLabel, ticketId, claimedBy }) {
     )
     .setFooter({ text: `Ticket ID: ${ticketId}` })
     .setTimestamp();
+
+  if (subject) e.addFields({ name: "Sujet", value: String(subject).slice(0, 256) });
+  if (details) e.addFields({ name: "Détails", value: String(details).slice(0, 1024) });
+
+  return e;
 }
 
 function buildTicketControls(ticketId, isClaimed) {
@@ -336,6 +378,22 @@ async function updateTicketMessage(interaction, data) {
     .catch(() => {});
 }
 
+/* ---------------- Wizard Drafts (Admin) ---------------- */
+
+const setupDrafts = new Map(); // key guildId:userId -> { cfg, types, panelStyle, title, desc }
+function dKey(guildId, userId) {
+  return `${guildId}:${userId}`;
+}
+function getDraft(guildId, userId) {
+  return setupDrafts.get(dKey(guildId, userId)) || null;
+}
+function setDraft(guildId, userId, value) {
+  setupDrafts.set(dKey(guildId, userId), { ...value, _t: Date.now() });
+}
+function clearDraft(guildId, userId) {
+  setupDrafts.delete(dKey(guildId, userId));
+}
+
 /* ---------------- Service ---------------- */
 
 function createTicketsService({ pool, config }) {
@@ -377,7 +435,6 @@ function createTicketsService({ pool, config }) {
         .setRequired(false)
         .setMaxLength(1500)
     )
-    // ✅ FIX: description <= 100 caractères (Discord constraint)
     .addStringOption((opt) =>
       opt
         .setName("categories")
@@ -457,7 +514,12 @@ function createTicketsService({ pool, config }) {
         .setMaxValue(365)
     );
 
-  const commands = [ticketPanelCmd, ticketConfigCmd, ticketStatsCmd];
+  // ✅ NOUVEAU: Wizard premium
+  const ticketSetupCmd = new SlashCommandBuilder()
+    .setName("ticket-setup")
+    .setDescription("ADMIN: Interface premium pour config + publier un panel pro");
+
+  const commands = [ticketPanelCmd, ticketConfigCmd, ticketStatsCmd, ticketSetupCmd];
 
   /* ---------------- Settings ---------------- */
 
@@ -471,6 +533,17 @@ function createTicketsService({ pool, config }) {
     claim_exclusive: Boolean(config.TICKET_CLAIM_EXCLUSIVE),
     delete_on_close: Boolean(config.TICKET_DELETE_ON_CLOSE),
   };
+
+  // ✅ optionnel: ajouter colonnes sujet/détails si tu veux les stocker (safe)
+  let ensuredExtraCols = false;
+  async function ensureExtraColumns() {
+    if (ensuredExtraCols) return;
+    ensuredExtraCols = true;
+    try {
+      await pool.query(`ALTER TABLE tickets ADD COLUMN IF NOT EXISTS subject TEXT;`);
+      await pool.query(`ALTER TABLE tickets ADD COLUMN IF NOT EXISTS details TEXT;`);
+    } catch {}
+  }
 
   async function getSettings(guildId) {
     const res = await pool.query(
@@ -533,7 +606,7 @@ function createTicketsService({ pool, config }) {
     return Boolean(interaction.member?.roles?.cache?.has?.(settings.staff_role_id));
   }
 
-  /* ---------------- Panel creation ---------------- */
+  /* ---------------- Panel creation (legacy) ---------------- */
 
   async function createPanel(interaction) {
     if (!isAdmin(interaction)) {
@@ -556,8 +629,6 @@ function createTicketsService({ pool, config }) {
 
     const panelId = crypto.randomUUID();
 
-    // mode simple -> option "categories" = raison libre
-    // mode categories -> option "categories" = liste
     const rawCategoriesOrReason = interaction.options.getString("categories") || "";
     let modePayload = null;
 
@@ -659,7 +730,9 @@ function createTicketsService({ pool, config }) {
     return { ok: true };
   }
 
-  async function createTicket(interaction, reasonLabel) {
+  async function createTicket(interaction, reasonLabel, subject = null, details = null) {
+    await ensureExtraColumns();
+
     const guild = interaction.guild;
     if (!guild) {
       await replyEphemeral(interaction, { content: "⚠️ Serveur introuvable." });
@@ -749,16 +822,26 @@ function createTicketsService({ pool, config }) {
     }
 
     await pool.query(
-      `INSERT INTO tickets (ticket_id, guild_id, channel_id, opener_id, category_label, status)
-       VALUES ($1,$2,$3,$4,$5,'open')`,
-      [ticketId, guild.id, channel.id, interaction.user.id, reason]
-    );
+      `INSERT INTO tickets (ticket_id, guild_id, channel_id, opener_id, category_label, status, subject, details)
+       VALUES ($1,$2,$3,$4,$5,'open',$6,$7)`,
+      [ticketId, guild.id, channel.id, interaction.user.id, reason, subject, details]
+    ).catch(async () => {
+      // fallback si colonnes non ajoutées (au cas où)
+      await pool.query(
+        `INSERT INTO tickets (ticket_id, guild_id, channel_id, opener_id, category_label, status)
+         VALUES ($1,$2,$3,$4,$5,'open')`,
+        [ticketId, guild.id, channel.id, interaction.user.id, reason]
+      );
+    });
 
     const embed = buildTicketEmbed({
       openerId: interaction.user.id,
       categoryLabel: reason,
       ticketId,
       claimedBy: null,
+      subject,
+      details,
+      guild,
     });
 
     const controls = buildTicketControls(ticketId, false);
@@ -777,10 +860,19 @@ function createTicketsService({ pool, config }) {
 
   async function getTicket(ticketId) {
     const res = await pool.query(
-      `SELECT ticket_id, guild_id, channel_id, opener_id, status, claimed_by, category_label, created_at, closed_at
+      `SELECT ticket_id, guild_id, channel_id, opener_id, status, claimed_by, category_label, created_at, closed_at,
+              subject, details
        FROM tickets WHERE ticket_id=$1 LIMIT 1`,
       [ticketId]
-    );
+    ).catch(async () => {
+      // fallback si colonnes pas là
+      const r2 = await pool.query(
+        `SELECT ticket_id, guild_id, channel_id, opener_id, status, claimed_by, category_label, created_at, closed_at
+         FROM tickets WHERE ticket_id=$1 LIMIT 1`,
+        [ticketId]
+      );
+      return r2;
+    });
     return res.rows[0] || null;
   }
 
@@ -832,7 +924,8 @@ function createTicketsService({ pool, config }) {
     }
   }
 
-  /* ---------------- Actions ---------------- */
+  /* ---------------- Actions (claim/close/delete/transcript/feedback/stats) ---------------- */
+  // ⬇️ JE CONSERVE TES FONCTIONS telles quelles, juste je réutilise buildTicketEmbed amélioré (inclut sujet/détails si présents)
 
   async function doClaim(interaction, ticketId) {
     const release = await acquireTicketLock(ticketId);
@@ -938,6 +1031,9 @@ function createTicketsService({ pool, config }) {
         categoryLabel: finalTicket.category_label || "Support",
         ticketId,
         claimedBy: finalTicket.claimed_by || null,
+        subject: finalTicket.subject || null,
+        details: finalTicket.details || null,
+        guild: interaction.guild,
       });
 
       await applyClaimExclusive(interaction.channel, settings, finalTicket.claimed_by || null);
@@ -981,6 +1077,7 @@ function createTicketsService({ pool, config }) {
     const opener = await client.users.fetch(ticketRow.opener_id).catch(() => null);
 
     const embed = new EmbedBuilder()
+      .setColor(premiumColor())
       .setTitle("⭐ Feedback ticket")
       .setDescription(
         [
@@ -1075,6 +1172,7 @@ function createTicketsService({ pool, config }) {
             });
 
             const embed = new EmbedBuilder()
+              .setColor(premiumColor())
               .setTitle("📄 Transcript")
               .addFields(
                 { name: "Ticket", value: `\`${ticketId}\`` },
@@ -1196,6 +1294,7 @@ function createTicketsService({ pool, config }) {
       const file = new AttachmentBuilder(Buffer.from(content, "utf8"), { name: `ticket-${ticketId}.txt` });
 
       const embed = new EmbedBuilder()
+        .setColor(premiumColor())
         .setTitle("📄 Transcript (manuel)")
         .addFields(
           { name: "Ticket", value: `\`${ticketId}\`` },
@@ -1296,6 +1395,7 @@ function createTicketsService({ pool, config }) {
         const fb = fbRes.rows[0] || {};
 
         const embed = new EmbedBuilder()
+          .setColor(premiumColor())
           .setTitle("⭐ Ticket feedback (admin)")
           .addFields(
             { name: "Ticket", value: `\`${ticketId}\`` },
@@ -1376,6 +1476,7 @@ function createTicketsService({ pool, config }) {
     const avg = f1.rows[0]?.avg ? f1.rows[0].avg.toFixed(2) : "N/A";
 
     const embed = new EmbedBuilder()
+      .setColor(premiumColor())
       .setTitle("📊 Ticket stats (admin)")
       .addFields(
         { name: "Période", value: `${days} jours`, inline: true },
@@ -1390,18 +1491,582 @@ function createTicketsService({ pool, config }) {
     return true;
   }
 
+  /* ---------------- Premium Setup Wizard ---------------- */
+
+  function buildSetupHomeEmbed(guild, settings, draft) {
+    const types = draft?.types?.length || 0;
+    return new EmbedBuilder()
+      .setColor(premiumColor())
+      .setAuthor(buildPremiumAuthor(guild))
+      .setTitle("⚙️ Ticket Setup • Premium Wizard")
+      .setDescription(
+        [
+          "Configure ton système de tickets et publie un panel premium **en quelques clics**.",
+          "",
+          `**Catégorie tickets :** ${settings.category_id ? `<#${settings.category_id}>` : "❌ Non définie"}`,
+          `**Rôle staff :** ${settings.staff_role_id ? `<@&${settings.staff_role_id}>` : "❌ Non défini"}`,
+          `**Salon feedback/transcripts :** ${
+            settings.admin_feedback_channel_id ? `<#${settings.admin_feedback_channel_id}>` : "—"
+          }`,
+          "",
+          `**Types (menu) :** **${types}**`,
+          "",
+          "✅ Le panel premium = *Catégorie → Formulaire → Ticket créé*",
+        ].join("\n")
+      )
+      .setFooter({ text: "Tout se passe en éphémère (privé)" })
+      .setTimestamp();
+  }
+
+  function buildSetupHomeComponents() {
+    return [
+      new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId("tsetup:config").setLabel("Configurer").setStyle(ButtonStyle.Primary).setEmoji("⚙️"),
+        new ButtonBuilder().setCustomId("tsetup:types").setLabel("Types").setStyle(ButtonStyle.Secondary).setEmoji("🧩"),
+        new ButtonBuilder().setCustomId("tsetup:preview").setLabel("Aperçu").setStyle(ButtonStyle.Secondary).setEmoji("👁️")
+      ),
+      new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId("tsetup:publish").setLabel("Publier").setStyle(ButtonStyle.Success).setEmoji("✅"),
+        new ButtonBuilder().setCustomId("tsetup:close").setLabel("Fermer").setStyle(ButtonStyle.Danger).setEmoji("✖️")
+      ),
+    ];
+  }
+
+  async function setupStart(interaction) {
+    if (!isAdmin(interaction)) {
+      await replyEphemeral(interaction, { content: "⛔ Admin uniquement." });
+      return true;
+    }
+
+    const settings = await getSettings(interaction.guildId);
+    const draft = getDraft(interaction.guildId, interaction.user.id) || {
+      types: PRESET_CATEGORIES.map((c) => ({ ...c })), // base premium
+      title: "🎫 Support Center",
+      description: null,
+    };
+    setDraft(interaction.guildId, interaction.user.id, draft);
+
+    const embed = buildSetupHomeEmbed(interaction.guild, settings, draft);
+    await replyEphemeral(interaction, { embeds: [embed], components: buildSetupHomeComponents() });
+    return true;
+  }
+
+  async function setupConfig(interaction) {
+    if (!isAdmin(interaction)) return true;
+
+    const settings = await getSettings(interaction.guildId);
+
+    // select category
+    const cats = interaction.guild.channels.cache
+      .filter((c) => c.type === ChannelType.GuildCategory)
+      .map((c) => ({ label: c.name.slice(0, 100), value: c.id }))
+      .slice(0, 25);
+
+    const roles = interaction.guild.roles.cache
+      .filter((r) => !r.managed && r.id !== interaction.guild.id)
+      .sort((a, b) => b.position - a.position)
+      .map((r) => ({ label: r.name.slice(0, 100), value: r.id }))
+      .slice(0, 25);
+
+    const texts = interaction.guild.channels.cache
+      .filter((c) => c.type === ChannelType.GuildText || c.type === ChannelType.GuildAnnouncement)
+      .map((c) => ({ label: `#${c.name}`.slice(0, 100), value: c.id }))
+      .slice(0, 25);
+
+    const embed = new EmbedBuilder()
+      .setColor(premiumColor())
+      .setAuthor(buildPremiumAuthor(interaction.guild))
+      .setTitle("Configurer le système")
+      .setDescription("Choisis les éléments via menus. Aucun ID à copier.")
+      .addFields(
+        { name: "Catégorie tickets", value: settings.category_id ? `<#${settings.category_id}>` : "—", inline: true },
+        { name: "Rôle staff", value: settings.staff_role_id ? `<@&${settings.staff_role_id}>` : "—", inline: true },
+        { name: "Salon admin (feedback/transcripts)", value: settings.admin_feedback_channel_id ? `<#${settings.admin_feedback_channel_id}>` : "—" }
+      )
+      .setTimestamp();
+
+    const row1 = new ActionRowBuilder().addComponents(
+      new StringSelectMenuBuilder()
+        .setCustomId("tsetup:set_category")
+        .setPlaceholder("📂 Choisir catégorie tickets…")
+        .addOptions(cats.length ? cats : [{ label: "Aucune catégorie trouvée", value: "none" }])
+    );
+    const row2 = new ActionRowBuilder().addComponents(
+      new StringSelectMenuBuilder()
+        .setCustomId("tsetup:set_staff")
+        .setPlaceholder("👮 Choisir rôle staff…")
+        .addOptions(roles.length ? roles : [{ label: "Aucun rôle trouvé", value: "none" }])
+    );
+    const row3 = new ActionRowBuilder().addComponents(
+      new StringSelectMenuBuilder()
+        .setCustomId("tsetup:set_adminch")
+        .setPlaceholder("🧾 Choisir salon admin (feedback/transcripts)…")
+        .addOptions([{ label: "Aucun", value: "none", description: "Désactiver logs admin" }, ...texts])
+    );
+    const row4 = new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId("tsetup:limits").setLabel("Limites & Cooldown").setStyle(ButtonStyle.Secondary).setEmoji("⏱️"),
+      new ButtonBuilder().setCustomId("tsetup:home").setLabel("Retour").setStyle(ButtonStyle.Danger).setEmoji("⬅️")
+    );
+
+    await interaction.update({ embeds: [embed], components: [row1, row2, row3, row4] });
+    return true;
+  }
+
+  async function setupLimitsModal(interaction) {
+    const settings = await getSettings(interaction.guildId);
+
+    const modal = new ModalBuilder().setCustomId("tsetup:limits_modal").setTitle("Limites & Cooldown");
+
+    const maxOpen = new TextInputBuilder()
+      .setCustomId("max_open")
+      .setLabel("Tickets ouverts max / utilisateur (1-5)")
+      .setStyle(TextInputStyle.Short)
+      .setRequired(true)
+      .setValue(String(settings.max_open_per_user ?? 1));
+
+    const cooldownMin = new TextInputBuilder()
+      .setCustomId("cooldown_min")
+      .setLabel("Cooldown création (minutes)")
+      .setStyle(TextInputStyle.Short)
+      .setRequired(true)
+      .setValue(String(Math.floor((settings.cooldown_seconds ?? 600) / 60)));
+
+    modal.addComponents(
+      new ActionRowBuilder().addComponents(maxOpen),
+      new ActionRowBuilder().addComponents(cooldownMin)
+    );
+
+    await interaction.showModal(modal).catch(() => {});
+    return true;
+  }
+
+  async function setupTypes(interaction) {
+    if (!isAdmin(interaction)) return true;
+
+    const draft = getDraft(interaction.guildId, interaction.user.id) || { types: PRESET_CATEGORIES.map((c) => ({ ...c })) };
+    setDraft(interaction.guildId, interaction.user.id, draft);
+
+    const list = (draft.types || [])
+      .slice(0, 15)
+      .map((t, i) => `**${i + 1}.** ${t.label} — ${t.description || "—"}`)
+      .join("\n") || "—";
+
+    const embed = new EmbedBuilder()
+      .setColor(premiumColor())
+      .setAuthor(buildPremiumAuthor(interaction.guild))
+      .setTitle("🧩 Types de tickets (menu)")
+      .setDescription(
+        [
+          "Ces types apparaissent dans le panel premium (Select).",
+          "",
+          list,
+          "",
+          "➕ Ajouter / ✏️ Modifier / 🗑️ Supprimer via les boutons.",
+        ].join("\n")
+      )
+      .setTimestamp();
+
+    const row = new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId("tsetup:type_add").setLabel("Ajouter").setStyle(ButtonStyle.Success).setEmoji("➕"),
+      new ButtonBuilder().setCustomId("tsetup:type_edit").setLabel("Modifier").setStyle(ButtonStyle.Secondary).setEmoji("✏️"),
+      new ButtonBuilder().setCustomId("tsetup:type_del").setLabel("Supprimer").setStyle(ButtonStyle.Danger).setEmoji("🗑️"),
+      new ButtonBuilder().setCustomId("tsetup:home").setLabel("Retour").setStyle(ButtonStyle.Secondary).setEmoji("⬅️")
+    );
+
+    await interaction.update({ embeds: [embed], components: [row] });
+    return true;
+  }
+
+  async function setupTypeModal(interaction, mode, current) {
+    const modal = new ModalBuilder()
+      .setCustomId(mode === "add" ? "tsetup:type_modal_add" : `tsetup:type_modal_edit:${current.value}`)
+      .setTitle(mode === "add" ? "Ajouter un type" : "Modifier un type");
+
+    const name = new TextInputBuilder()
+      .setCustomId("label")
+      .setLabel("Nom (label)")
+      .setStyle(TextInputStyle.Short)
+      .setRequired(true)
+      .setMaxLength(80)
+      .setValue(current?.label || "");
+
+    const value = new TextInputBuilder()
+      .setCustomId("value")
+      .setLabel("Identifiant (value)")
+      .setStyle(TextInputStyle.Short)
+      .setRequired(true)
+      .setMaxLength(50)
+      .setValue(current?.value || "");
+
+    const desc = new TextInputBuilder()
+      .setCustomId("desc")
+      .setLabel("Description")
+      .setStyle(TextInputStyle.Short)
+      .setRequired(false)
+      .setMaxLength(100)
+      .setValue(current?.description || "");
+
+    modal.addComponents(
+      new ActionRowBuilder().addComponents(name),
+      new ActionRowBuilder().addComponents(value),
+      new ActionRowBuilder().addComponents(desc)
+    );
+
+    await interaction.showModal(modal).catch(() => {});
+    return true;
+  }
+
+  async function setupPickType(interaction, kind) {
+    const draft = getDraft(interaction.guildId, interaction.user.id);
+    if (!draft?.types?.length) {
+      await safeFollowUpEphemeral(interaction, { content: "➖ Aucun type." });
+      return true;
+    }
+
+    const options = draft.types.slice(0, 25).map((t) => ({
+      label: t.label.slice(0, 100),
+      value: t.value,
+      description: (t.description || "—").slice(0, 100),
+    }));
+
+    const menu = new StringSelectMenuBuilder()
+      .setCustomId(kind === "edit" ? "tsetup:pick_edit" : "tsetup:pick_del")
+      .setPlaceholder(kind === "edit" ? "Quel type modifier ?" : "Quel type supprimer ?")
+      .addOptions(options);
+
+    await interaction.reply({
+      content: "Sélectionne un type :",
+      components: [new ActionRowBuilder().addComponents(menu)],
+      flags: MessageFlags.Ephemeral,
+    }).catch(() => {});
+    return true;
+  }
+
+  async function setupPreview(interaction) {
+    const draft = getDraft(interaction.guildId, interaction.user.id) || { types: PRESET_CATEGORIES.map((c) => ({ ...c })) };
+
+    const embed = buildPremiumPanelEmbed({
+      guild: interaction.guild,
+      title: draft.title,
+      description: draft.description,
+    });
+
+    const menu = new StringSelectMenuBuilder()
+      .setCustomId("ticketp:select:preview")
+      .setPlaceholder("Choisis une catégorie…")
+      .addOptions(
+        (draft.types || PRESET_CATEGORIES).slice(0, 25).map((c) => ({
+          label: c.label,
+          value: c.value,
+          description: c.description,
+        }))
+      );
+
+    await interaction.reply({
+      content: "👁️ Aperçu du panel premium :",
+      embeds: [embed],
+      components: [new ActionRowBuilder().addComponents(menu)],
+      flags: MessageFlags.Ephemeral,
+    }).catch(() => {});
+    return true;
+  }
+
+  async function setupPublish(interaction) {
+    const draft = getDraft(interaction.guildId, interaction.user.id) || { types: PRESET_CATEGORIES.map((c) => ({ ...c })) };
+
+    const channels = interaction.guild.channels.cache
+      .filter((c) => c.type === ChannelType.GuildText || c.type === ChannelType.GuildAnnouncement)
+      .map((c) => ({ label: `#${c.name}`.slice(0, 100), value: c.id }))
+      .slice(0, 25);
+
+    const menu = new StringSelectMenuBuilder()
+      .setCustomId("tsetup:publish_pick")
+      .setPlaceholder("Choisis le salon où publier le panel premium…")
+      .addOptions(channels.length ? channels : [{ label: "Aucun salon texte trouvé", value: "none" }]);
+
+    await interaction.reply({
+      content: "✅ Choisis un salon :",
+      components: [new ActionRowBuilder().addComponents(menu)],
+      flags: MessageFlags.Ephemeral,
+    }).catch(() => {});
+    return true;
+  }
+
+  async function publishPanelToChannel(interaction, channelId) {
+    const guild = interaction.guild;
+    if (!guild) return true;
+
+    const ch = await guild.channels.fetch(channelId).catch(() => null);
+    if (!ch || !ch.isTextBased?.()) {
+      await replyEphemeral(interaction, { content: "⚠️ Salon invalide." });
+      return true;
+    }
+
+    const settings = await getSettings(guild.id);
+    if (!settings.category_id) {
+      await replyEphemeral(interaction, { content: "⚠️ Configure d’abord la catégorie tickets (/ticket-config set category:...)" });
+      return true;
+    }
+
+    const draft = getDraft(guild.id, interaction.user.id) || { types: PRESET_CATEGORIES.map((c) => ({ ...c })) };
+    const types = draft.types?.length ? draft.types : PRESET_CATEGORIES;
+
+    const panelId = crypto.randomUUID();
+    const payload = { categories: types, premium: true };
+
+    const embed = buildPremiumPanelEmbed({ guild, title: draft.title, description: draft.description });
+
+    const menu = new StringSelectMenuBuilder()
+      .setCustomId(`ticketp:select:${panelId}`)
+      .setPlaceholder("Choisis une catégorie…")
+      .addOptions(
+        types.slice(0, 25).map((c) => ({
+          label: c.label,
+          value: c.value,
+          description: c.description,
+        }))
+      );
+
+    const msg = await ch.send({ embeds: [embed], components: [new ActionRowBuilder().addComponents(menu)] });
+
+    await pool.query(
+      `INSERT INTO ticket_panels (panel_id, guild_id, channel_id, message_id, mode, categories, created_by)
+       VALUES ($1,$2,$3,$4,$5,$6,$7)
+       ON CONFLICT (panel_id) DO NOTHING`,
+      [panelId, guild.id, msg.channel.id, msg.id, "premium", JSON.stringify(payload), interaction.user.id]
+    );
+
+    await replyEphemeral(interaction, { content: `✅ Panel premium publié dans <#${msg.channel.id}>.` });
+    return true;
+  }
+
+  /* ---------------- Premium ticket: Select -> Modal -> Create ---------------- */
+
+  async function openPremiumModal(interaction, panelId, selectedValue, label) {
+    const modal = new ModalBuilder()
+      .setCustomId(`ticketp:modal:${panelId}:${selectedValue}:${encodeURIComponent(label || selectedValue)}`)
+      .setTitle("Créer un ticket");
+
+    const subject = new TextInputBuilder()
+      .setCustomId("subject")
+      .setLabel("Sujet (court)")
+      .setStyle(TextInputStyle.Short)
+      .setRequired(true)
+      .setMaxLength(80)
+      .setPlaceholder("Ex: Problème, question, support…");
+
+    const details = new TextInputBuilder()
+      .setCustomId("details")
+      .setLabel("Détails (raison)")
+      .setStyle(TextInputStyle.Paragraph)
+      .setRequired(true)
+      .setMaxLength(600)
+      .setPlaceholder("Explique clairement ta demande pour une réponse rapide.");
+
+    modal.addComponents(
+      new ActionRowBuilder().addComponents(subject),
+      new ActionRowBuilder().addComponents(details)
+    );
+
+    await interaction.showModal(modal).catch(async () => {
+      await replyEphemeral(interaction, { content: "⚠️ Impossible d’ouvrir le formulaire. Réessaie." });
+    });
+
+    return true;
+  }
+
   /* ---------------- Router ---------------- */
 
   async function handleInteraction(interaction, client) {
-    // MODALS
+    // PREMIUM MODALS
     if (interaction.isModalSubmit()) {
+      if (interaction.customId === "tsetup:limits_modal") {
+        if (!isAdmin(interaction)) return true;
+
+        const maxOpen = parseInt(interaction.fields.getTextInputValue("max_open"), 10);
+        const cdMin = parseInt(interaction.fields.getTextInputValue("cooldown_min"), 10);
+
+        if (!Number.isFinite(maxOpen) || maxOpen < 1 || maxOpen > 5) {
+          await replyEphemeral(interaction, { content: "❌ max_open doit être entre 1 et 5." });
+          return true;
+        }
+        if (!Number.isFinite(cdMin) || cdMin < 0 || cdMin > 1440) {
+          await replyEphemeral(interaction, { content: "❌ cooldown (minutes) doit être entre 0 et 1440." });
+          return true;
+        }
+
+        await upsertSettings(interaction.guildId, {
+          max_open_per_user: maxOpen,
+          cooldown_seconds: cdMin * 60,
+        });
+
+        await replyEphemeral(interaction, { content: "✅ Limites mises à jour." });
+        return true;
+      }
+
+      if (interaction.customId === "tsetup:type_modal_add") {
+        if (!isAdmin(interaction)) return true;
+
+        const draft = getDraft(interaction.guildId, interaction.user.id) || { types: [] };
+
+        const label = interaction.fields.getTextInputValue("label").trim().slice(0, 100);
+        const value = interaction.fields.getTextInputValue("value").trim().slice(0, 50);
+        const desc = (interaction.fields.getTextInputValue("desc") || "").trim().slice(0, 100);
+
+        if (!label || !value) {
+          await replyEphemeral(interaction, { content: "❌ Label & Value obligatoires." });
+          return true;
+        }
+
+        const exists = (draft.types || []).some((t) => t.value === value);
+        if (exists) {
+          await replyEphemeral(interaction, { content: "❌ Value déjà utilisé. Choisis un identifiant unique." });
+          return true;
+        }
+
+        draft.types = draft.types || [];
+        draft.types.push({ label, value, description: desc || undefined });
+
+        setDraft(interaction.guildId, interaction.user.id, draft);
+        await replyEphemeral(interaction, { content: "✅ Type ajouté." });
+        return true;
+      }
+
+      if (interaction.customId.startsWith("tsetup:type_modal_edit:")) {
+        if (!isAdmin(interaction)) return true;
+
+        const editValue = interaction.customId.split(":").pop();
+        const draft = getDraft(interaction.guildId, interaction.user.id);
+        if (!draft?.types?.length) {
+          await replyEphemeral(interaction, { content: "⚠️ Session expirée. Relance /ticket-setup" });
+          return true;
+        }
+
+        const label = interaction.fields.getTextInputValue("label").trim().slice(0, 100);
+        const value = interaction.fields.getTextInputValue("value").trim().slice(0, 50);
+        const desc = (interaction.fields.getTextInputValue("desc") || "").trim().slice(0, 100);
+
+        const idx = draft.types.findIndex((t) => t.value === editValue);
+        if (idx === -1) {
+          await replyEphemeral(interaction, { content: "⚠️ Type introuvable." });
+          return true;
+        }
+
+        // prevent duplicate value if changed
+        if (value !== editValue && draft.types.some((t) => t.value === value)) {
+          await replyEphemeral(interaction, { content: "❌ Value déjà utilisé." });
+          return true;
+        }
+
+        draft.types[idx] = { label, value, description: desc || undefined };
+        setDraft(interaction.guildId, interaction.user.id, draft);
+
+        await replyEphemeral(interaction, { content: "✅ Type modifié." });
+        return true;
+      }
+
+      if (interaction.customId.startsWith("ticketp:modal:")) {
+        // ticket premium submit
+        const parts = interaction.customId.split(":"); // ticketp modal panelId selected labelEncoded
+        const panelId = parts[2];
+        const selected = parts[3];
+        const label = decodeURIComponent(parts.slice(4).join(":") || selected);
+
+        const subject = interaction.fields.getTextInputValue("subject");
+        const details = interaction.fields.getTextInputValue("details");
+
+        await interaction.deferReply({ flags: MessageFlags.Ephemeral }).catch(() => {});
+        return await createTicket(interaction, label || selected || "Support", subject, details);
+      }
+
+      // EXISTING COMMENT MODAL
       if (!interaction.customId.startsWith("ticket:comment:")) return false;
       const parts = interaction.customId.split(":");
       return await doComment(interaction, client, parts[2], parts[3]);
     }
 
-    // SELECT MENU
+    // PREMIUM SELECT (panel premium)
     if (interaction.isStringSelectMenu()) {
+      if (interaction.customId.startsWith("tsetup:set_category")) {
+        if (!isAdmin(interaction)) return true;
+        const v = interaction.values?.[0];
+        if (v && v !== "none") await upsertSettings(interaction.guildId, { category_id: v });
+        await replyEphemeral(interaction, { content: "✅ Catégorie tickets mise à jour." });
+        return true;
+      }
+
+      if (interaction.customId.startsWith("tsetup:set_staff")) {
+        if (!isAdmin(interaction)) return true;
+        const v = interaction.values?.[0];
+        if (v && v !== "none") await upsertSettings(interaction.guildId, { staff_role_id: v });
+        await replyEphemeral(interaction, { content: "✅ Rôle staff mis à jour." });
+        return true;
+      }
+
+      if (interaction.customId.startsWith("tsetup:set_adminch")) {
+        if (!isAdmin(interaction)) return true;
+        const v = interaction.values?.[0];
+        await upsertSettings(interaction.guildId, { admin_feedback_channel_id: v === "none" ? null : v });
+        // transcript_channel_id reste géré via /ticket-config si tu veux, sinon on peut l'ajouter au wizard aussi
+        await replyEphemeral(interaction, { content: "✅ Salon admin mis à jour." });
+        return true;
+      }
+
+      if (interaction.customId === "tsetup:pick_edit") {
+        if (!isAdmin(interaction)) return true;
+        const v = interaction.values?.[0];
+        const draft = getDraft(interaction.guildId, interaction.user.id);
+        const cur = draft?.types?.find((t) => t.value === v);
+        if (!cur) {
+          await replyEphemeral(interaction, { content: "⚠️ Type introuvable." });
+          return true;
+        }
+        return await setupTypeModal(interaction, "edit", cur);
+      }
+
+      if (interaction.customId === "tsetup:pick_del") {
+        if (!isAdmin(interaction)) return true;
+        const v = interaction.values?.[0];
+        const draft = getDraft(interaction.guildId, interaction.user.id);
+        if (!draft?.types?.length) {
+          await replyEphemeral(interaction, { content: "⚠️ Session expirée. Relance /ticket-setup" });
+          return true;
+        }
+        draft.types = draft.types.filter((t) => t.value !== v);
+        setDraft(interaction.guildId, interaction.user.id, draft);
+        await replyEphemeral(interaction, { content: "✅ Type supprimé." });
+        return true;
+      }
+
+      if (interaction.customId === "tsetup:publish_pick") {
+        if (!isAdmin(interaction)) return true;
+        const chId = interaction.values?.[0];
+        await publishPanelToChannel(interaction, chId);
+        return true;
+      }
+
+      // ticket premium select => modal
+      if (interaction.customId.startsWith("ticketp:select:")) {
+        const panelId = interaction.customId.split(":")[2];
+        const value = interaction.values?.[0];
+
+        // preview case
+        if (panelId === "preview") {
+          const draft = getDraft(interaction.guildId, interaction.user.id) || { types: PRESET_CATEGORIES };
+          const found = (draft.types || PRESET_CATEGORIES).find((c) => c.value === value);
+          return await openPremiumModal(interaction, "preview", value, found?.label || value);
+        }
+
+        const panel = await getPanel(panelId);
+        const payload = parsePanelPayload(panel?.categories);
+        const arr = payload?.categories;
+        const found = Array.isArray(arr) ? arr.find((c) => c.value === value) : null;
+        const label = found?.label || value || "Support";
+
+        return await openPremiumModal(interaction, panelId, value, label);
+      }
+
+      // EXISTING SELECT (legacy)
       if (!interaction.customId.startsWith("ticket:select:")) return false;
 
       const panelId = interaction.customId.split(":")[2];
@@ -1423,6 +2088,35 @@ function createTicketsService({ pool, config }) {
 
     // BUTTONS
     if (interaction.isButton()) {
+      // wizard buttons
+      if (interaction.customId.startsWith("tsetup:")) {
+        if (!isAdmin(interaction)) return true;
+
+        if (interaction.customId === "tsetup:close") {
+          await interaction.update({ content: "✅ Fermé.", embeds: [], components: [] }).catch(() => {});
+          return true;
+        }
+        if (interaction.customId === "tsetup:home") {
+          const settings = await getSettings(interaction.guildId);
+          const draft = getDraft(interaction.guildId, interaction.user.id);
+          const embed = buildSetupHomeEmbed(interaction.guild, settings, draft);
+          await interaction.update({ embeds: [embed], components: buildSetupHomeComponents(), content: "" }).catch(() => {});
+          return true;
+        }
+        if (interaction.customId === "tsetup:config") return await setupConfig(interaction);
+        if (interaction.customId === "tsetup:types") return await setupTypes(interaction);
+        if (interaction.customId === "tsetup:preview") return await setupPreview(interaction);
+        if (interaction.customId === "tsetup:publish") return await setupPublish(interaction);
+        if (interaction.customId === "tsetup:limits") return await setupLimitsModal(interaction);
+
+        if (interaction.customId === "tsetup:type_add") return await setupTypeModal(interaction, "add", null);
+        if (interaction.customId === "tsetup:type_edit") return await setupPickType(interaction, "edit");
+        if (interaction.customId === "tsetup:type_del") return await setupPickType(interaction, "del");
+
+        return true;
+      }
+
+      // legacy ticket buttons
       if (!interaction.customId.startsWith("ticket:")) return false;
 
       const parts = interaction.customId.split(":");
@@ -1455,6 +2149,8 @@ function createTicketsService({ pool, config }) {
     // SLASH
     if (!interaction.isChatInputCommand()) return false;
 
+    if (interaction.commandName === "ticket-setup") return await setupStart(interaction);
+
     if (interaction.commandName === "ticket-panel") return await createPanel(interaction);
 
     if (interaction.commandName === "ticket-config") {
@@ -1469,6 +2165,7 @@ function createTicketsService({ pool, config }) {
         const s = await getSettings(interaction.guildId);
 
         const embed = new EmbedBuilder()
+          .setColor(premiumColor())
           .setTitle("⚙️ Ticket config (admin)")
           .addFields(
             { name: "Category", value: s.category_id ? `<#${s.category_id}>` : "—" },
