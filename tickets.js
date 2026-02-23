@@ -1571,7 +1571,7 @@ function createTicketsService({ pool, config }) {
     const texts = interaction.guild.channels.cache
       .filter((c) => c.type === ChannelType.GuildText || c.type === ChannelType.GuildAnnouncement)
       .map((c) => ({ label: `#${c.name}`.slice(0, 100), value: c.id }))
-      .slice(0, 25);
+      .slice(0, 24);
 
     const embed = new EmbedBuilder()
       .setColor(premiumColor())
