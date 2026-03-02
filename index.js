@@ -24,6 +24,9 @@ const { createUpdatesService } = require("./updates");
 // ✅ NOUVEAU : WorL
 const { createWorlService } = require("./worl");
 
+// ✅ NOUVEAU : HELP
+const { createHelpService } = require("./help");
+
 /* ----------------------------- ENV ------------------------------ */
 const TOKEN = process.env.DISCORD_TOKEN;
 const CLIENT_ID = process.env.CLIENT_ID;
@@ -363,10 +366,27 @@ const updates = createUpdatesService({ pool, config });
 // ✅ NOUVEAU
 const worl = createWorlService({ pool, config });
 
+// ✅ HELP service
+const help = createHelpService({
+  services: {
+    vouches,
+    rankup,
+    modrank,
+    tickets,
+    giveaways,
+    moderation,
+    automod,
+    updates,
+    worl,
+    sendMessage,
+  },
+});
+
 /* ----------------------------- Slash commands deployment ------------------------------ */
 async function registerCommands() {
   const commands = [
     new SlashCommandBuilder().setName("ping").setDescription("Répond pong + latence"),
+    ...help.commands, // ✅ AJOUT HELP
     ...vouches.commands,
     ...rankup.commands,
     ...modrank.commands,
@@ -460,6 +480,9 @@ process.on("uncaughtException", (err) => console.error("uncaughtException:", err
 /* ----------------------------- Interactions ------------------------------ */
 client.on("interactionCreate", async (interaction) => {
   try {
+    // ✅ HELP (slash + select + boutons)
+    if (await help.handleInteraction(interaction, client)) return;
+
     // Tickets
     if (await tickets.handleInteraction(interaction, client)) return;
 
