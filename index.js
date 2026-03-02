@@ -436,7 +436,7 @@ client.once("ready", async () => {
     { name: "🏆 WorL • Vote Win / Lose", type: ActivityType.Playing },
     { name: "🎫 Tickets • Premium Support", type: ActivityType.Playing },
     { name: "🛡️ Modération • Sécurité active", type: ActivityType.Playing },
-    { name: "⭐ Vouches • Système d'avis", type: ActivityType.Playing },
+    { name: "⭐ Vouches • Système d'avis/Feedback", type: ActivityType.Playing },
     { name: "⚙️ /help • Toutes les commandes", type: ActivityType.Playing },
     { name: `🌍 ${client.guilds.cache.size} serveurs`, type: ActivityType.Watching },
   ];
