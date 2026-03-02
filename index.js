@@ -17,9 +17,11 @@ const { createTicketsService } = require("./tickets");
 const { createGiveawayService } = require("./giveaway");
 const { createModerationService } = require("./moderation");
 const { createAutomodService } = require("./automod");
-
-// ✅ NOUVEAU : updates/broadcast
+// ✅ updates/broadcast
 const { createUpdatesService } = require("./updates");
+
+// ✅ NOUVEAU : WorL
+const { createWorlService } = require("./worl");
 
 /* ----------------------------- ENV ------------------------------ */
 const TOKEN = process.env.DISCORD_TOKEN;
@@ -28,8 +30,6 @@ const GUILD_ID = process.env.GUILD_ID || null;
 const COMMANDS_SCOPE = (
   process.env.COMMANDS_SCOPE || (GUILD_ID ? "guild" : "global")
 ).toLowerCase();
-
-// ✅ owner id pour /broadcast & /broadcastembed
 const OWNER_ID = process.env.OWNER_ID || null;
 
 /* ----------------------------- Vouches ------------------------------ */
@@ -81,8 +81,7 @@ const config = {
   CLIENT_ID,
   GUILD_ID,
   COMMANDS_SCOPE,
-
-  OWNER_ID, // ✅
+  OWNER_ID,
 
   VOUCH_CHANNEL_ID,
   VOUCHBOARD_REFRESH_MS,
@@ -168,6 +167,7 @@ async function initDb() {
       PRIMARY KEY (guild_id, role_id)
     );
     CREATE INDEX IF NOT EXISTS idx_modrank_roles_guild_position ON modrank_roles (guild_id, position);
+
     CREATE TABLE IF NOT EXISTS modrank_counters (
       guild_id TEXT PRIMARY KEY,
       last_ref BIGINT NOT NULL DEFAULT 0
@@ -186,6 +186,7 @@ async function initDb() {
       delete_on_close BOOLEAN NOT NULL DEFAULT FALSE,
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
+
     CREATE TABLE IF NOT EXISTS ticket_panels (
       panel_id TEXT PRIMARY KEY,
       guild_id TEXT NOT NULL,
@@ -292,23 +293,49 @@ async function initDb() {
     CREATE INDEX IF NOT EXISTS idx_mod_cases_guild_created ON mod_cases (guild_id, created_at DESC);
     CREATE INDEX IF NOT EXISTS idx_mod_cases_guild_action_created ON mod_cases (guild_id, action, created_at DESC);
 
-    /* ✅ --- automod --- */
+    /* ✅ automod */
     CREATE TABLE IF NOT EXISTS automod_settings (
       guild_id TEXT PRIMARY KEY,
       settings_json JSONB NOT NULL DEFAULT '{}'::jsonb,
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
 
-    /* ✅ --- updates / broadcast --- */
+    /* ✅ updates / broadcast */
     CREATE TABLE IF NOT EXISTS updates_settings (
       guild_id TEXT PRIMARY KEY,
       channel_id TEXT,
       enabled BOOLEAN NOT NULL DEFAULT TRUE,
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
+
+    /* ✅ WorL */
+    CREATE TABLE IF NOT EXISTS worl_polls (
+      poll_id TEXT PRIMARY KEY,
+      guild_id TEXT NOT NULL,
+      channel_id TEXT NOT NULL,
+      message_id TEXT NOT NULL,
+      creator_id TEXT NOT NULL,
+      mode TEXT NOT NULL DEFAULT 'trade',
+      trade_text TEXT NOT NULL,
+      contre_text TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'open',
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      closed_at TIMESTAMPTZ
+    );
+    CREATE INDEX IF NOT EXISTS idx_worl_polls_guild_status ON worl_polls (guild_id, status);
+
+    CREATE TABLE IF NOT EXISTS worl_votes (
+      poll_id TEXT NOT NULL REFERENCES worl_polls(poll_id) ON DELETE CASCADE,
+      guild_id TEXT NOT NULL,
+      user_id TEXT NOT NULL,
+      choice TEXT NOT NULL CHECK (choice IN ('W','L')),
+      voted_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      PRIMARY KEY (poll_id, user_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_worl_votes_poll ON worl_votes (poll_id);
   `);
 
-  console.log("✅ DB prête (modules + automod + updates OK).");
+  console.log("✅ DB prête (modules + automod + updates + worl OK).");
 }
 
 /* ----------------------------- Client ------------------------------ */
@@ -330,15 +357,15 @@ const tickets = createTicketsService({ pool, config });
 const giveaways = createGiveawayService({ pool, config });
 const moderation = createModerationService({ pool, config });
 const automod = createAutomodService({ pool, config });
+const updates = createUpdatesService({ pool, config });
 
 // ✅ NOUVEAU
-const updates = createUpdatesService({ pool, config });
+const worl = createWorlService({ pool, config });
 
 /* ----------------------------- Slash commands deployment ------------------------------ */
 async function registerCommands() {
   const commands = [
     new SlashCommandBuilder().setName("ping").setDescription("Répond pong + latence"),
-
     ...vouches.commands,
     ...rankup.commands,
     ...modrank.commands,
@@ -347,9 +374,9 @@ async function registerCommands() {
     ...giveaways.commands,
     ...moderation.commands,
     ...automod.commands,
-
-    // ✅ updates
     ...updates.commands,
+    // ✅ WorL
+    ...worl.commands,
   ].map((c) => c.toJSON());
 
   const rest = new REST({ version: "10" }).setToken(TOKEN);
@@ -373,16 +400,15 @@ async function registerCommands() {
     return;
   }
 
-  console.warn(`⚠️ COMMANDS_SCOPE invalide: '${COMMANDS_SCOPE}'.
-Mets global|guild|both.
-(fallback => global)`);
+  console.warn(
+    `⚠️ COMMANDS_SCOPE invalide: '${COMMANDS_SCOPE}'.\nMets global|guild|both.\n(fallback => global)`
+  );
   await rest.put(Routes.applicationCommands(CLIENT_ID), { body: commands });
 }
 
 /* ----------------------------- Ready ------------------------------ */
 client.once("ready", async () => {
   console.log(`✅ Connecté en tant que ${client.user.tag}`);
-
   try {
     await initDb();
     await registerCommands();
@@ -417,11 +443,14 @@ client.on("interactionCreate", async (interaction) => {
     // Giveaways
     if (await giveaways.handleInteraction(interaction, client)) return;
 
-    // ✅ Automod (panel + config)
+    // Automod
     if (await automod.handleInteraction(interaction, client)) return;
 
-    // ✅ Updates/broadcast
+    // Updates/broadcast
     if (await updates.handleInteraction(interaction, client)) return;
+
+    // ✅ WorL (boutons + /worl)
+    if (await worl.handleInteraction(interaction, client)) return;
 
     // Le reste: slash uniquement
     if (!interaction.isChatInputCommand()) return;
@@ -438,7 +467,6 @@ client.on("interactionCreate", async (interaction) => {
     if (await moderation.handleInteraction(interaction, client)) return;
   } catch (e) {
     console.error("interactionCreate fatal:", e);
-
     if (interaction?.isRepliable?.()) {
       if (!interaction.deferred && !interaction.replied) {
         await interaction
@@ -457,10 +485,7 @@ client.on("interactionCreate", async (interaction) => {
 /* ----------------------------- Prefix commands + Automod message ------------------------------ */
 client.on("messageCreate", async (message) => {
   try {
-    // ✅ Automod d’abord (anti mention/link)
     if (await automod.handleMessage(message, client)) return;
-
-    // mod prefix (ex: .banlist)
     if (await moderation.handleMessage?.(message, client)) return;
   } catch (e) {
     console.error("messageCreate fatal:", e);
@@ -492,7 +517,6 @@ client.on("channelDelete", async (channel) => {
   }
 });
 
-// webhook updates (best effort)
 client.on("webhooksUpdate", async (channel) => {
   try {
     await automod.handleWebhooksUpdate(channel, client);
