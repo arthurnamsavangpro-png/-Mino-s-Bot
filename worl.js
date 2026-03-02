@@ -448,7 +448,7 @@ function createWorlService({ pool, config }) {
           contreText: poll.contre_text,
           wCount: w,
           lCount: l,
-        }).setTitle("🔒 Trade Check — Fermé");
+        }).setTitle("🔒 Trade — Fermé");
 
         await interaction.message.edit({
           embeds: [embed],
