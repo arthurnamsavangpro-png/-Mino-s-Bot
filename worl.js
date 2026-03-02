@@ -115,7 +115,7 @@ function buildPollEmbed({ guild, creatorId, tradeText, contreText, wCount, lCoun
   const total = wCount + lCount;
 
   const e = new EmbedBuilder()
-    .setTitle("💱 Trade Check — W or L ?")
+    .setTitle("💱 Trade — W or L ?")
     .setDescription(`Posté par <@${creatorId}>`)
     .addFields(
       { name: "🧊 Je trade :", value: tradeText || "—", inline: false },
