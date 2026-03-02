@@ -6,6 +6,7 @@ const {
   Routes,
   SlashCommandBuilder,
   MessageFlags,
+  ActivityType, // ✅ AJOUT
 } = require("discord.js");
 const { Pool } = require("pg");
 
@@ -409,6 +410,31 @@ async function registerCommands() {
 /* ----------------------------- Ready ------------------------------ */
 client.once("ready", async () => {
   console.log(`✅ Connecté en tant que ${client.user.tag}`);
+
+  // ✅ Rotation des activités (status)
+  const activities = [
+    { name: "🏆 WorL • Vote Win / Lose", type: ActivityType.Playing },
+    { name: "🎫 Tickets • Premium Support", type: ActivityType.Playing },
+    { name: "🛡️ Modération • Sécurité active", type: ActivityType.Playing },
+    { name: "⭐ Vouches • Système d'avis", type: ActivityType.Playing },
+    { name: "⚙️ /help • Toutes les commandes", type: ActivityType.Playing },
+    { name: `🌍 ${client.guilds.cache.size} serveurs`, type: ActivityType.Watching },
+  ];
+
+  let i = 0;
+
+  const updatePresence = () => {
+    const a = activities[i];
+    client.user.setPresence({
+      activities: [{ name: a.name, type: a.type }],
+      status: "online",
+    });
+    i = (i + 1) % activities.length;
+  };
+
+  updatePresence(); // 🔥 direct
+  setInterval(updatePresence, 15_000); // toutes les 15s
+
   try {
     await initDb();
     await registerCommands();
