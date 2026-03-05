@@ -221,16 +221,32 @@ function createAbsenceService({ pool }) {
     const user = await guild.client.users.fetch(absence.user_id).catch(() => null);
     if (!user) return;
 
-    const verdict = approved ? '✅ **approuvée**' : '❌ **refusée**';
-    const msg = [
-      `Ta demande d'absence \`${absence.absence_id}\` a été ${verdict}.`,
-      `• Début: ${new Date(absence.start_at).toLocaleString('fr-FR')}`,
-      `• Fin: ${new Date(absence.end_at).toLocaleString('fr-FR')}`,
-      `• Décision par: <@${byUser.id}>`,
-    ];
-    if (reason) msg.push(`• Motif: ${reason}`);
+    const color = approved ? 0x2ecc71 : 0xe74c3c;
+    const statusLabel = approved ? '✅ Absence approuvée' : '❌ Absence refusée';
+    const summary = approved
+      ? 'Ta demande a été validée. Bon courage et reviens-nous en forme 💪'
+      : 'Ta demande a été refusée. Tu peux refaire une demande si nécessaire.';
 
-    await user.send({ content: msg.join('\n') }).catch(() => {});
+    const decisionAt = Math.floor(Date.now() / 1000);
+    const embed = new EmbedBuilder()
+      .setColor(color)
+      .setTitle(statusLabel)
+      .setDescription(summary)
+      .addFields(
+        { name: '🆔 Identifiant', value: `\`${absence.absence_id}\``, inline: true },
+        { name: '👤 Décision par', value: `<@${byUser.id}>`, inline: true },
+        { name: '🕒 Date de décision', value: `<t:${decisionAt}:f>`, inline: true },
+        { name: '📅 Début', value: formatDate(absence.start_at), inline: true },
+        { name: '🏁 Fin', value: formatDate(absence.end_at), inline: true },
+      )
+      .setFooter({ text: `Serveur: ${guild.name}` })
+      .setTimestamp(new Date());
+
+    if (reason) {
+      embed.addFields({ name: '📝 Motif', value: reason, inline: false });
+    }
+
+    await user.send({ embeds: [embed] }).catch(() => {});
   }
 
   async function rejectAbsence({ guild, absenceId, byUser, reason }) {
