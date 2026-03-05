@@ -15,7 +15,7 @@ function createSendMessageService() {
     .setName("send")
     .setDescription("MOD: Envoie un message texte via le bot")
     .addStringOption((opt) =>
-      opt.setName("message").setDescription("Texte à envoyer").setRequired(false).setMaxLength(2000)
+      opt.setName("texte").setDescription("Texte à envoyer").setRequired(false).setMaxLength(2000)
     )
     .addChannelOption((opt) =>
       opt
@@ -301,7 +301,7 @@ function createSendMessageService() {
       if (isSend) {
         await interaction.deferReply({ flags: MessageFlags.Ephemeral }).catch(() => {});
 
-        const message = (interaction.options.getString("message") || "").trim();
+        const message = ((interaction.options.getString("texte") || interaction.options.getString("message") || "")).trim();
         const explicitChannel = interaction.options.getChannel("salon") || null;
 
         const replyRaw = interaction.options.getString("reply_to") || null;
