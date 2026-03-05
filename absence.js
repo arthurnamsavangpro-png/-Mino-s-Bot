@@ -565,19 +565,38 @@ function createAbsenceService({ pool }) {
       }
 
       const panelEmbed = new EmbedBuilder()
-        .setTitle('🧾 Panel Absence Staff')
-        .setDescription('Utilise les boutons ci-dessous pour gérer ton absence.')
+        .setColor(0x5865f2)
+        .setTitle('📌 Panel officiel • Gestion des absences')
+        .setDescription([
+          'Bienvenue dans le **centre de gestion des absences staff**.',
+          'Utilise les boutons ci-dessous pour effectuer une action rapidement.',
+          '',
+          '⚠️ Une seule absence active (`pending` ou `approved`) est autorisée par membre.'
+        ].join('\n'))
         .addFields(
-          { name: 'Déclarer', value: 'Crée une nouvelle demande d\'absence.', inline: false },
-          { name: 'Retour', value: 'Termine/annule ton absence active.', inline: false },
-          { name: 'Statut', value: 'Affiche ton absence active actuelle.', inline: false }
+          {
+            name: '📝 Déclarer une absence',
+            value: 'Ouvre un formulaire guidé pour renseigner la date de début, la date de fin et la raison.',
+            inline: false,
+          },
+          {
+            name: '🔙 Signaler ton retour',
+            value: 'Clôture une absence approuvée ou annule une demande encore en attente.',
+            inline: false,
+          },
+          {
+            name: '📊 Voir ton statut',
+            value: 'Affiche instantanément ton absence active avec son ID et son état actuel.',
+            inline: false,
+          }
         )
-        .setColor(0x5865f2);
+        .setFooter({ text: "Mino's Bot • Absence Panel" })
+        .setTimestamp(new Date());
 
       const panelRow = new ActionRowBuilder().addComponents(
-        new ButtonBuilder().setCustomId('absence:declare').setLabel('Déclarer').setStyle(ButtonStyle.Primary),
-        new ButtonBuilder().setCustomId('absence:retour').setLabel('Retour').setStyle(ButtonStyle.Secondary),
-        new ButtonBuilder().setCustomId('absence:statut').setLabel('Statut').setStyle(ButtonStyle.Success)
+        new ButtonBuilder().setCustomId('absence:declare').setLabel('Déclarer').setEmoji('📝').setStyle(ButtonStyle.Primary),
+        new ButtonBuilder().setCustomId('absence:retour').setLabel('Retour').setEmoji('🔙').setStyle(ButtonStyle.Secondary),
+        new ButtonBuilder().setCustomId('absence:statut').setLabel('Statut').setEmoji('📊').setStyle(ButtonStyle.Success)
       );
 
       await interaction.channel.send({ embeds: [panelEmbed], components: [panelRow] });
