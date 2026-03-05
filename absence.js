@@ -565,7 +565,7 @@ function createAbsenceService({ pool }) {
       }
 
       const panelEmbed = new EmbedBuilder()
-        .setColor(0x5865f2)
+        .setColor(0xe74c3c)
         .setTitle('📌 Panel officiel • Gestion des absences')
         .setDescription([
           'Bienvenue dans le **centre de gestion des absences staff**.',
