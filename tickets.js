@@ -330,8 +330,8 @@ function buildPremiumAuthor(guild) {
   };
 }
 
-function buildPremiumPanelEmbed({ guild, title, description }) {
-  return new EmbedBuilder()
+function buildPremiumPanelEmbed({ guild, title, description, banner, bannerPosition }) {
+  const embed = new EmbedBuilder()
     .setColor(premiumColor())
     .setAuthor(buildPremiumAuthor(guild))
     .setTitle(title || "🎫 Support Center")
@@ -346,6 +346,13 @@ function buildPremiumPanelEmbed({ guild, title, description }) {
     )
     .setFooter({ text: "Tickets Premium • Mino Bot" })
     .setTimestamp();
+
+  if (banner && isValidHttpUrl(banner) && (bannerPosition || "bottom") === "bottom") embed.setImage(banner);
+  return embed;
+}
+
+function buildTopBannerEmbed(banner) {
+  return new EmbedBuilder().setColor(premiumColor()).setImage(banner);
 }
 
 /* ---------------- Ticket UI ---------------- */
@@ -1853,7 +1860,17 @@ function createTicketsService({ pool, config }) {
     const panelId = crypto.randomUUID();
     const payload = { categories: types, premium: true, layout: "select" };
 
-    const embed = buildPremiumPanelEmbed({ guild, title: draft.title, description: draft.description });
+    const embed = buildPremiumPanelEmbed({
+      guild,
+      title: draft.title,
+      description: draft.description,
+      banner: draft.banner,
+      bannerPosition: draft.banner_position,
+    });
+
+    const embeds = [];
+    if (draft.banner && isValidHttpUrl(draft.banner) && draft.banner_position === "top") embeds.push(buildTopBannerEmbed(draft.banner));
+    embeds.push(embed);
 
     const menu = new StringSelectMenuBuilder()
       .setCustomId(`ticketp:select:${panelId}`)
@@ -1869,7 +1886,7 @@ function createTicketsService({ pool, config }) {
         )
       );
 
-    const msg = await ch.send({ embeds: [embed], components: [new ActionRowBuilder().addComponents(menu)] });
+    const msg = await ch.send({ embeds, components: [new ActionRowBuilder().addComponents(menu)] });
 
     await pool.query(
       `INSERT INTO ticket_panels (panel_id, guild_id, channel_id, message_id, mode, categories, created_by)
@@ -1949,6 +1966,10 @@ function createTicketsService({ pool, config }) {
       // ✅ NEW: formulaire ON/OFF
       form_enabled: true,
 
+      // Bannière panel premium
+      banner: "",
+      banner_position: "bottom", // "top" | "bottom"
+
       // Mode Simple
       simple: null, // { enabled, thumb, title, text, footer, category, btnStyle, btnLabel }
     };
@@ -1962,6 +1983,7 @@ function createTicketsService({ pool, config }) {
       : `—`;
 
     const formLine = draft?.form_enabled ? "✅ Avec" : "❌ Sans";
+    const bannerLine = draft?.banner && isValidHttpUrl(draft.banner) ? `✅ Configurée (${draft.banner_position === "top" ? "haut" : "bas"})` : "—";
 
     return new EmbedBuilder()
       .setColor(premiumColor())
@@ -1975,6 +1997,7 @@ function createTicketsService({ pool, config }) {
           `**Types :** **${tCount}**`,
           `**Salon cible :** ${draft.target_channel_id ? `<#${draft.target_channel_id}>` : "—"}`,
           `**Formulaire :** ${formLine}`,
+          `**Bannière :** ${bannerLine}`,
           `**Mode Simple :** ${simpleLine}`,
           "",
           "Utilise les boutons ci-dessous, puis **Aperçu** et **Publier**.",
@@ -2000,6 +2023,7 @@ function createTicketsService({ pool, config }) {
       ),
       new ActionRowBuilder().addComponents(
         new ButtonBuilder().setCustomId("tpnl:channel").setLabel("Salon").setStyle(ButtonStyle.Secondary).setEmoji("📍"),
+        new ButtonBuilder().setCustomId("tpnl:banner").setLabel("Bannière").setStyle(ButtonStyle.Secondary).setEmoji("🖼️"),
         new ButtonBuilder().setCustomId("tpnl:preview").setLabel("Aperçu").setStyle(ButtonStyle.Secondary).setEmoji("👁️"),
         new ButtonBuilder().setCustomId("tpnl:publish").setLabel("Publier").setStyle(ButtonStyle.Success).setEmoji("✅"),
         new ButtonBuilder().setCustomId("tpnl:close").setLabel("Fermer").setStyle(ButtonStyle.Danger).setEmoji("✖️")
@@ -2044,6 +2068,34 @@ function createTicketsService({ pool, config }) {
       .setValue((draft.description || "").slice(0, 1500));
 
     modal.addComponents(new ActionRowBuilder().addComponents(title), new ActionRowBuilder().addComponents(desc));
+    await interaction.showModal(modal).catch(() => {});
+    return true;
+  }
+
+  async function panelBuilderOpenBannerModal(interaction) {
+    const draft = getPanelDraft(interaction.guildId, interaction.user.id) || defaultPanelBuilderDraft(interaction.guild);
+
+    const modal = new ModalBuilder().setCustomId("tpnl:banner_modal").setTitle("Bannière du panel");
+
+    const banner = new TextInputBuilder()
+      .setCustomId("banner")
+      .setLabel("URL de la bannière (optionnel, vide = supprimer)")
+      .setStyle(TextInputStyle.Short)
+      .setRequired(false)
+      .setMaxLength(500)
+      .setValue((draft.banner || "").slice(0, 500))
+      .setPlaceholder("https://.../image.png");
+
+    const position = new TextInputBuilder()
+      .setCustomId("position")
+      .setLabel("Position (haut ou bas)")
+      .setStyle(TextInputStyle.Short)
+      .setRequired(false)
+      .setMaxLength(10)
+      .setValue((draft.banner_position === "top" ? "haut" : "bas").slice(0, 10))
+      .setPlaceholder("haut");
+
+    modal.addComponents(new ActionRowBuilder().addComponents(banner), new ActionRowBuilder().addComponents(position));
     await interaction.showModal(modal).catch(() => {});
     return true;
   }
@@ -2335,6 +2387,11 @@ function createTicketsService({ pool, config }) {
 
     if (s.thumb && isValidHttpUrl(s.thumb)) e.setThumbnail(s.thumb);
 
+    const embeds = [];
+    if (draft.banner && isValidHttpUrl(draft.banner) && draft.banner_position === "top") embeds.push(buildTopBannerEmbed(draft.banner));
+    if (draft.banner && isValidHttpUrl(draft.banner) && (draft.banner_position || "bottom") !== "top") e.setImage(draft.banner);
+    embeds.push(e);
+
     const label = (s.category || "Support").slice(0, 100);
     const value = slugValue(label);
 
@@ -2346,7 +2403,7 @@ function createTicketsService({ pool, config }) {
       .setLabel(btnLabel)
       .setStyle(parseButtonStyle(s.btnStyle || "primary"));
 
-    return { embed: e, components: [new ActionRowBuilder().addComponents(btn)], label, value };
+    return { embeds, components: [new ActionRowBuilder().addComponents(btn)], label, value };
   }
 
   function buildPanelFromDraft(guild, draft) {
@@ -2355,7 +2412,17 @@ function createTicketsService({ pool, config }) {
       return buildSimplePanelFromDraft(guild, draft, null);
     }
 
-    const embed = buildPremiumPanelEmbed({ guild, title: draft.title, description: draft.description });
+    const embed = buildPremiumPanelEmbed({
+      guild,
+      title: draft.title,
+      description: draft.description,
+      banner: draft.banner,
+      bannerPosition: draft.banner_position,
+    });
+
+    const embeds = [];
+    if (draft.banner && isValidHttpUrl(draft.banner) && draft.banner_position === "top") embeds.push(buildTopBannerEmbed(draft.banner));
+    embeds.push(embed);
 
     const types = draft.types?.length ? draft.types : PRESET_CATEGORIES;
 
@@ -2374,7 +2441,7 @@ function createTicketsService({ pool, config }) {
         }
         row.addComponents(b);
       }
-      return { embed, components: [row], types };
+      return { embeds, components: [row], types };
     }
 
     const menu = new StringSelectMenuBuilder()
@@ -2391,7 +2458,7 @@ function createTicketsService({ pool, config }) {
         )
       );
 
-    return { embed, components: [new ActionRowBuilder().addComponents(menu)], types };
+    return { embeds, components: [new ActionRowBuilder().addComponents(menu)], types };
   }
 
   async function panelBuilderPreview(interaction) {
@@ -2401,7 +2468,7 @@ function createTicketsService({ pool, config }) {
     await interaction
       .reply({
         content: draft?.simple?.enabled ? "👁️ Aperçu du panel (Mode Simple) :" : "👁️ Aperçu du panel (builder) :",
-        embeds: [built.embed],
+        embeds: built.embeds,
         components: built.components,
         flags: MessageFlags.Ephemeral,
       })
@@ -2443,7 +2510,7 @@ function createTicketsService({ pool, config }) {
     // Mode Simple publish
     if (draft?.simple?.enabled) {
       const built = buildSimplePanelFromDraft(guild, draft, panelId);
-      const msg = await ch.send({ embeds: [built.embed], components: built.components });
+      const msg = await ch.send({ embeds: built.embeds, components: built.components });
 
       const payload = {
         premium: true,
@@ -2451,6 +2518,8 @@ function createTicketsService({ pool, config }) {
 
         // ✅ NEW
         useForm: Boolean(draft.form_enabled),
+        banner: draft.banner || "",
+        bannerPosition: draft.banner_position || "bottom",
 
         title: draft.simple?.title || draft.title,
         description: draft.simple?.text || draft.description,
@@ -2489,13 +2558,25 @@ function createTicketsService({ pool, config }) {
 
       // ✅ NEW
       useForm: Boolean(draft.form_enabled),
+      banner: draft.banner || "",
+      bannerPosition: draft.banner_position || "bottom",
 
       categories: types,
       title: draft.title,
       description: draft.description,
     };
 
-    const embed = buildPremiumPanelEmbed({ guild, title: draft.title, description: draft.description });
+    const embed = buildPremiumPanelEmbed({
+      guild,
+      title: draft.title,
+      description: draft.description,
+      banner: draft.banner,
+      bannerPosition: draft.banner_position,
+    });
+
+    const embeds = [];
+    if (draft.banner && isValidHttpUrl(draft.banner) && draft.banner_position === "top") embeds.push(buildTopBannerEmbed(draft.banner));
+    embeds.push(embed);
 
     let components = [];
     if (draft.layout === "buttons") {
@@ -2531,7 +2612,7 @@ function createTicketsService({ pool, config }) {
       components = [new ActionRowBuilder().addComponents(menu)];
     }
 
-    const msg = await ch.send({ embeds: [embed], components });
+    const msg = await ch.send({ embeds, components });
 
     await pool.query(
       `INSERT INTO ticket_panels (panel_id, guild_id, channel_id, message_id, mode, categories, created_by)
@@ -2632,6 +2713,43 @@ function createTicketsService({ pool, config }) {
         setPanelDraft(interaction.guildId, interaction.user.id, draft);
 
         await replyEphemeral(interaction, { content: "✅ Style mis à jour." });
+        return true;
+      }
+
+      if (interaction.customId === "tpnl:banner_modal") {
+        if (!isAdmin(interaction)) return true;
+
+        const draft = getPanelDraft(interaction.guildId, interaction.user.id) || defaultPanelBuilderDraft(interaction.guild);
+        const bannerRaw = (interaction.fields.getTextInputValue("banner") || "").trim();
+        const positionRaw = (interaction.fields.getTextInputValue("position") || "").trim().toLowerCase();
+
+        if (bannerRaw && !isValidHttpUrl(bannerRaw)) {
+          await replyEphemeral(interaction, { content: "❌ URL invalide. Utilise un lien http(s)." });
+          return true;
+        }
+
+        const positionMap = {
+          haut: "top",
+          top: "top",
+          bas: "bottom",
+          bottom: "bottom",
+          "": draft.banner_position || "bottom",
+        };
+        const nextPosition = positionMap[positionRaw];
+        if (!nextPosition) {
+          await replyEphemeral(interaction, { content: "❌ Position invalide. Mets `haut` ou `bas`." });
+          return true;
+        }
+
+        draft.banner = bannerRaw.slice(0, 500);
+        draft.banner_position = nextPosition;
+        setPanelDraft(interaction.guildId, interaction.user.id, draft);
+
+        await replyEphemeral(interaction, {
+          content: draft.banner
+            ? `✅ Bannière enregistrée (${draft.banner_position === "top" ? "haut" : "bas"}).`
+            : "✅ Bannière supprimée.",
+        });
         return true;
       }
 
@@ -2967,6 +3085,7 @@ function createTicketsService({ pool, config }) {
         }
 
         if (interaction.customId === "tpnl:style") return await panelBuilderOpenStyleModal(interaction);
+        if (interaction.customId === "tpnl:banner") return await panelBuilderOpenBannerModal(interaction);
         if (interaction.customId === "tpnl:layout") return await panelBuilderToggleLayout(interaction);
         if (interaction.customId === "tpnl:types") return await panelBuilderTypesView(interaction);
         if (interaction.customId === "tpnl:channel") return await panelBuilderPickChannel(interaction);
