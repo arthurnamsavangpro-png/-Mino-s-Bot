@@ -13,8 +13,6 @@ function parseDateInput(input) {
   if (!input) return null;
   const s = String(input).trim();
   if (!s) return null;
-
-  // YYYY-MM-DD HH:mm or YYYY-MM-DDTHH:mm
   const normalized = s.replace(' ', 'T');
   const d = new Date(normalized);
   if (Number.isNaN(d.getTime())) return null;
@@ -131,11 +129,8 @@ function createAbsenceService({ pool }) {
     return settings;
   }
 
-  async function approveAbsence({ interaction, guild, settings, absenceId, byUser }) {
-    const res = await pool.query(
-      `SELECT * FROM staff_absences WHERE guild_id=$1 AND absence_id=$2`,
-      [guild.id, absenceId]
-    );
+  async function approveAbsence({ guild, settings, absenceId, byUser }) {
+    const res = await pool.query(`SELECT * FROM staff_absences WHERE guild_id=$1 AND absence_id=$2`, [guild.id, absenceId]);
     const absence = res.rows[0];
     if (!absence) return { ok: false, message: 'Absence introuvable.' };
     if (absence.status !== 'pending') return { ok: false, message: `Statut actuel: ${absence.status}.` };
@@ -152,14 +147,15 @@ function createAbsenceService({ pool }) {
       await member.roles.add(settings.absence_role_id, `Absence approuvée (${absenceId})`).catch(() => {});
     }
 
-    return { ok: true, absence };
+    const fresh = { ...absence, status: 'approved', approved_by: byUser.id };
+    await updateDecisionMessage({ guild, absence: fresh, status: 'approved', byUser });
+    await notifyMemberDecision({ guild, absence: fresh, byUser, approved: true });
+
+    return { ok: true, absence: fresh };
   }
 
   async function rejectAbsence({ guild, absenceId, byUser, reason }) {
-    const res = await pool.query(
-      `SELECT * FROM staff_absences WHERE guild_id=$1 AND absence_id=$2`,
-      [guild.id, absenceId]
-    );
+    const res = await pool.query(`SELECT * FROM staff_absences WHERE guild_id=$1 AND absence_id=$2`, [guild.id, absenceId]);
     const absence = res.rows[0];
     if (!absence) return { ok: false, message: 'Absence introuvable.' };
     if (absence.status !== 'pending') return { ok: false, message: `Statut actuel: ${absence.status}.` };
@@ -170,7 +166,12 @@ function createAbsenceService({ pool }) {
        WHERE guild_id=$1 AND absence_id=$2`,
       [guild.id, absenceId, byUser.id, reason || null]
     );
-    return { ok: true, absence };
+
+    const fresh = { ...absence, status: 'rejected', approved_by: byUser.id, decision_reason: reason || null };
+    await updateDecisionMessage({ guild, absence: fresh, status: 'rejected', byUser, reason });
+    await notifyMemberDecision({ guild, absence: fresh, byUser, approved: false, reason });
+
+    return { ok: true, absence: fresh };
   }
 
   async function handleInteraction(interaction) {
@@ -180,21 +181,14 @@ function createAbsenceService({ pool }) {
       const settings = await ensureConfigured(interaction);
       if (!settings) return true;
 
-      const member = interaction.member;
-      const canModerate = isAdmin(interaction) || hasRequiredRole(member, settings.admin_role_id);
+      const canModerate = isAdmin(interaction) || hasRequiredRole(interaction.member, settings.admin_role_id);
       if (!canModerate) {
         await interaction.reply({ content: '❌ Tu ne peux pas valider/refuser.', flags: MessageFlags.Ephemeral });
         return true;
       }
 
       if (action === 'approve') {
-        const out = await approveAbsence({
-          interaction,
-          guild: interaction.guild,
-          settings,
-          absenceId,
-          byUser: interaction.user,
-        });
+        const out = await approveAbsence({ guild: interaction.guild, settings, absenceId, byUser: interaction.user });
         if (!out.ok) {
           await interaction.reply({ content: `❌ ${out.message}`, flags: MessageFlags.Ephemeral });
           return true;
@@ -204,12 +198,7 @@ function createAbsenceService({ pool }) {
       }
 
       if (action === 'reject') {
-        const out = await rejectAbsence({
-          guild: interaction.guild,
-          absenceId,
-          byUser: interaction.user,
-          reason: 'Refus via bouton',
-        });
+        const out = await rejectAbsence({ guild: interaction.guild, absenceId, byUser: interaction.user, reason: 'Refus via bouton' });
         if (!out.ok) {
           await interaction.reply({ content: `❌ ${out.message}`, flags: MessageFlags.Ephemeral });
           return true;
@@ -222,7 +211,6 @@ function createAbsenceService({ pool }) {
     }
 
     if (!interaction.isChatInputCommand() || interaction.commandName !== 'absence') return false;
-
     const sub = interaction.options.getSubcommand();
 
     if (sub === 'set') {
@@ -259,7 +247,6 @@ function createAbsenceService({ pool }) {
     if (!settings) return true;
 
     const canDeclare = isAdmin(interaction) || hasRequiredRole(interaction.member, settings.staff_role_id);
-
     if (sub === 'declare') {
       if (!canDeclare) {
         await interaction.reply({ content: '❌ Tu dois avoir le rôle staff configuré.', flags: MessageFlags.Ephemeral });
@@ -301,19 +288,6 @@ function createAbsenceService({ pool }) {
         [absenceId, interaction.guildId, interaction.user.id, startAt.toISOString(), endAt.toISOString(), reason || null]
       );
 
-      const embed = new EmbedBuilder()
-        .setColor(0xf1c40f)
-        .setTitle('📝 Nouvelle demande d\'absence')
-        .setDescription(`ID: \`${absenceId}\``)
-        .addFields(
-          { name: 'Membre', value: `<@${interaction.user.id}>`, inline: true },
-          { name: 'Début', value: formatDate(startAt), inline: true },
-          { name: 'Fin', value: formatDate(endAt), inline: true },
-          { name: 'Raison', value: reason || 'Non précisée', inline: false },
-          { name: 'Statut', value: '⏳ En attente de validation admin', inline: false }
-        )
-        .setTimestamp();
-
       const row = new ActionRowBuilder().addComponents(
         new ButtonBuilder().setCustomId(`absence:approve:${absenceId}`).setLabel('Approuver').setStyle(ButtonStyle.Success),
         new ButtonBuilder().setCustomId(`absence:reject:${absenceId}`).setLabel('Refuser').setStyle(ButtonStyle.Danger)
@@ -321,7 +295,26 @@ function createAbsenceService({ pool }) {
 
       const logChannel = await interaction.guild.channels.fetch(settings.log_channel_id).catch(() => null);
       if (logChannel?.isTextBased()) {
-        await logChannel.send({ embeds: [embed], components: [row] }).catch(() => {});
+        const pending = {
+          absence_id: absenceId,
+          user_id: interaction.user.id,
+          start_at: startAt,
+          end_at: endAt,
+          reason: reason || null,
+        };
+        const sent = await logChannel
+          .send({
+            embeds: [buildRequestEmbed(pending, '⏳ En attente de validation admin', 0xf1c40f)],
+            components: [row],
+          })
+          .catch(() => null);
+
+        if (sent?.id) {
+          await pool.query(
+            `UPDATE staff_absences SET log_channel_id=$3, log_message_id=$4, updated_at=NOW() WHERE guild_id=$1 AND absence_id=$2`,
+            [interaction.guildId, absenceId, sent.channelId, sent.id]
+          );
+        }
       }
 
       await interaction.reply({
@@ -339,7 +332,7 @@ function createAbsenceService({ pool }) {
         return true;
       }
       const absenceId = interaction.options.getString('absence_id', true);
-      const out = await approveAbsence({ interaction, guild: interaction.guild, settings, absenceId, byUser: interaction.user });
+      const out = await approveAbsence({ guild: interaction.guild, settings, absenceId, byUser: interaction.user });
       if (!out.ok) {
         await interaction.reply({ content: `❌ ${out.message}`, flags: MessageFlags.Ephemeral });
         return true;
