@@ -2079,7 +2079,7 @@ function createTicketsService({ pool, config }) {
 
     const banner = new TextInputBuilder()
       .setCustomId("banner")
-      .setLabel("URL de la bannière (optionnel, vide = supprimer)")
+      .setLabel("URL bannière (optionnel, vide = supprimer)")
       .setStyle(TextInputStyle.Short)
       .setRequired(false)
       .setMaxLength(500)
