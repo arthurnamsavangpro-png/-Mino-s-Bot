@@ -20,6 +20,7 @@ const { createModerationService } = require("./moderation");
 const { createAutomodService } = require("./automod");
 // ✅ updates/broadcast
 const { createUpdatesService } = require("./updates");
+const { createAbsenceService } = require("./absence");
 
 // ✅ NOUVEAU : WorL
 const { createWorlService } = require("./worl");
@@ -312,6 +313,34 @@ async function initDb() {
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
 
+    /* ✅ absence staff */
+    CREATE TABLE IF NOT EXISTS absence_settings (
+      guild_id TEXT PRIMARY KEY,
+      staff_role_id TEXT,
+      admin_role_id TEXT,
+      absence_role_id TEXT,
+      log_channel_id TEXT,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+
+    CREATE TABLE IF NOT EXISTS staff_absences (
+      absence_id TEXT PRIMARY KEY,
+      guild_id TEXT NOT NULL,
+      user_id TEXT NOT NULL,
+      start_at TIMESTAMPTZ NOT NULL,
+      end_at TIMESTAMPTZ NOT NULL,
+      reason TEXT,
+      status TEXT NOT NULL DEFAULT 'pending',
+      approved_by TEXT,
+      approved_at TIMESTAMPTZ,
+      decision_reason TEXT,
+      ended_at TIMESTAMPTZ,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS idx_staff_absences_guild_user_status ON staff_absences (guild_id, user_id, status);
+    CREATE INDEX IF NOT EXISTS idx_staff_absences_guild_status_end ON staff_absences (guild_id, status, end_at);
+
     /* ✅ WorL */
     CREATE TABLE IF NOT EXISTS worl_polls (
       poll_id TEXT PRIMARY KEY,
@@ -362,6 +391,7 @@ const giveaways = createGiveawayService({ pool, config });
 const moderation = createModerationService({ pool, config });
 const automod = createAutomodService({ pool, config });
 const updates = createUpdatesService({ pool, config });
+const absence = createAbsenceService({ pool, config });
 
 // ✅ NOUVEAU
 const worl = createWorlService({ pool, config });
@@ -377,6 +407,7 @@ const help = createHelpService({
     moderation,
     automod,
     updates,
+    absence,
     worl,
     sendMessage,
   },
@@ -396,6 +427,7 @@ async function registerCommands() {
     ...moderation.commands,
     ...automod.commands,
     ...updates.commands,
+    ...absence.commands,
     // ✅ WorL
     ...worl.commands,
   ].map((c) => c.toJSON());
@@ -497,6 +529,9 @@ client.on("interactionCreate", async (interaction) => {
 
     // Updates/broadcast
     if (await updates.handleInteraction(interaction, client)) return;
+
+    // Absence
+    if (await absence.handleInteraction(interaction, client)) return;
 
     // ✅ WorL (boutons + /worl)
     if (await worl.handleInteraction(interaction, client)) return;
