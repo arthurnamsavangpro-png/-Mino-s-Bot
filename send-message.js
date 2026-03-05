@@ -15,7 +15,7 @@ function createSendMessageService() {
     .setName("send")
     .setDescription("MOD: Envoie un message texte via le bot")
     .addStringOption((opt) =>
-      opt.setName("message").setDescription("Texte à envoyer").setRequired(true).setMaxLength(2000)
+      opt.setName("message").setDescription("Texte à envoyer").setRequired(false).setMaxLength(2000)
     )
     .addChannelOption((opt) =>
       opt
@@ -301,7 +301,7 @@ function createSendMessageService() {
       if (isSend) {
         await interaction.deferReply({ flags: MessageFlags.Ephemeral }).catch(() => {});
 
-        const message = interaction.options.getString("message", true);
+        const message = (interaction.options.getString("message") || "").trim();
         const explicitChannel = interaction.options.getChannel("salon") || null;
 
         const replyRaw = interaction.options.getString("reply_to") || null;
@@ -344,6 +344,13 @@ function createSendMessageService() {
         }
 
         const attachment = interaction.options.getAttachment("file");
+        if (!message && !attachment) {
+          await interaction
+            .editReply("⚠️ Tu dois fournir au moins un message ou un fichier.")
+            .catch(() => {});
+          return true;
+        }
+
         const files = attachment ? [{ attachment: attachment.url, name: attachment.name || "file" }] : undefined;
 
         const replyRes = await resolveReply(targetChannel, replyParsed?.messageId || "0");
@@ -353,7 +360,7 @@ function createSendMessageService() {
         }
 
         await targetChannel.send({
-          content: String(message).slice(0, 2000),
+          content: message ? message.slice(0, 2000) : undefined,
           files,
           allowedMentions,
           reply: replyRes.reply,
