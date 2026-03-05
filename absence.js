@@ -6,6 +6,9 @@ const {
   ButtonBuilder,
   ButtonStyle,
   ActionRowBuilder,
+  ModalBuilder,
+  TextInputBuilder,
+  TextInputStyle,
 } = require('discord.js');
 const { randomUUID } = require('crypto');
 
@@ -138,6 +141,9 @@ function createAbsenceService({ pool }) {
           .setName('statut')
           .setDescription('Voir le statut d\'absence d\'un membre')
           .addUserOption((opt) => opt.setName('membre').setDescription('Membre ciblé').setRequired(false))
+      )
+      .addSubcommand((sc) =>
+        sc.setName('panel').setDescription('Créer le panel d\'absence dans le salon courant (admin)')
       ),
   ];
 
@@ -247,12 +253,185 @@ function createAbsenceService({ pool }) {
     return { ok: true, absence: fresh };
   }
 
+
+  async function createAbsenceRequest({ interaction, settings, startInput, endInput, reason }) {
+    const startAt = parseDateInput(startInput) || new Date();
+    const endAt = parseDateInput(endInput);
+    if (!endAt) {
+      await interaction.reply({ content: '❌ Date de fin invalide. Format attendu: `YYYY-MM-DD HH:mm`.', flags: MessageFlags.Ephemeral });
+      return true;
+    }
+    if (endAt <= startAt) {
+      await interaction.reply({ content: '❌ La date de fin doit être après la date de début.', flags: MessageFlags.Ephemeral });
+      return true;
+    }
+
+    const existing = await pool.query(
+      `SELECT absence_id FROM staff_absences WHERE guild_id=$1 AND user_id=$2 AND status IN ('pending','approved') ORDER BY created_at DESC LIMIT 1`,
+      [interaction.guildId, interaction.user.id]
+    );
+    if (existing.rows[0]) {
+      await interaction.reply({
+        content: `⚠️ Tu as déjà une absence en cours (${existing.rows[0].absence_id}). Termine-la avant d'en créer une autre.`,
+        flags: MessageFlags.Ephemeral,
+      });
+      return true;
+    }
+
+    const absenceId = `abs_${randomUUID().slice(0, 8)}`;
+    await pool.query(
+      `INSERT INTO staff_absences (
+        absence_id, guild_id, user_id, start_at, end_at, reason, status, created_at, updated_at
+      ) VALUES ($1,$2,$3,$4,$5,$6,'pending',NOW(),NOW())`,
+      [absenceId, interaction.guildId, interaction.user.id, startAt.toISOString(), endAt.toISOString(), reason || null]
+    );
+
+    const row = new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId(`absence:approve:${absenceId}`).setLabel('Approuver').setStyle(ButtonStyle.Success),
+      new ButtonBuilder().setCustomId(`absence:reject:${absenceId}`).setLabel('Refuser').setStyle(ButtonStyle.Danger)
+    );
+
+    const logChannel = await interaction.guild.channels.fetch(settings.log_channel_id).catch(() => null);
+    if (logChannel?.isTextBased()) {
+      const pending = {
+        absence_id: absenceId,
+        user_id: interaction.user.id,
+        start_at: startAt,
+        end_at: endAt,
+        reason: reason || null,
+      };
+      const sent = await logChannel
+        .send({
+          embeds: [buildRequestEmbed(pending, '⏳ En attente de validation admin', 0xf1c40f)],
+          components: [row],
+        })
+        .catch(() => null);
+
+      if (sent?.id) {
+        await pool.query(
+          `UPDATE staff_absences SET log_channel_id=$3, log_message_id=$4, updated_at=NOW() WHERE guild_id=$1 AND absence_id=$2`,
+          [interaction.guildId, absenceId, sent.channelId, sent.id]
+        );
+      }
+    }
+
+    await interaction.reply({
+      content: `✅ Demande envoyée pour validation admin. ID: \`${absenceId}\``,
+      flags: MessageFlags.Ephemeral,
+    });
+    return true;
+  }
+
+  async function handleRetour(interaction, settings) {
+    const row = await pool.query(
+      `SELECT * FROM staff_absences WHERE guild_id=$1 AND user_id=$2 AND status IN ('pending','approved') ORDER BY created_at DESC LIMIT 1`,
+      [interaction.guildId, interaction.user.id]
+    );
+    const absence = row.rows[0];
+    if (!absence) {
+      await interaction.reply({ content: 'ℹ️ Tu n\'as pas d\'absence active.', flags: MessageFlags.Ephemeral });
+      return true;
+    }
+
+    const nextStatus = absence.status === 'approved' ? 'ended' : 'cancelled';
+
+    await pool.query(
+      `UPDATE staff_absences SET status=$3, ended_at=NOW(), updated_at=NOW() WHERE guild_id=$1 AND absence_id=$2`,
+      [interaction.guildId, absence.absence_id, nextStatus]
+    );
+
+    if (absence.status === 'approved') {
+      const member = await interaction.guild.members.fetch(interaction.user.id).catch(() => null);
+      if (member && settings.absence_role_id && member.roles.cache.has(settings.absence_role_id)) {
+        await member.roles.remove(settings.absence_role_id, `Retour absence (${absence.absence_id})`).catch(() => {});
+      }
+    }
+
+    await updateDecisionMessage({
+      guild: interaction.guild,
+      absence: { ...absence, status: nextStatus },
+      status: nextStatus,
+      byUser: interaction.user,
+      reason: nextStatus === 'cancelled' ? 'Annulée par le membre via /absence retour' : undefined,
+    });
+
+    const retourMsg =
+      nextStatus === 'cancelled'
+        ? `✅ Demande \`${absence.absence_id}\` annulée.`
+        : `✅ Retour enregistré pour \`${absence.absence_id}\`.`;
+    await interaction.reply({ content: retourMsg, flags: MessageFlags.Ephemeral });
+    return true;
+  }
+
+  async function handleStatut(interaction, targetUser) {
+    const user = targetUser || interaction.user;
+    const row = await pool.query(
+      `SELECT * FROM staff_absences WHERE guild_id=$1 AND user_id=$2 AND status IN ('pending','approved') ORDER BY created_at DESC LIMIT 1`,
+      [interaction.guildId, user.id]
+    );
+    const absence = row.rows[0];
+    if (!absence) {
+      await interaction.reply({ content: `ℹ️ ${user} n\'a pas d\'absence active.`, flags: MessageFlags.Ephemeral });
+      return true;
+    }
+
+    const statusTxt = absence.status === 'pending' ? '⏳ En attente de validation' : '✅ Absence approuvée';
+    await interaction.reply({
+      content: `**Statut de ${user}:**
+• ID: \`${absence.absence_id}\`
+• Début: ${formatDate(absence.start_at)}
+• Fin: ${formatDate(absence.end_at)}
+• Statut: ${statusTxt}`,
+      flags: MessageFlags.Ephemeral,
+    });
+    return true;
+  }
+
   async function handleInteraction(interaction) {
     if (interaction.isButton()) {
       if (!interaction.customId.startsWith('absence:')) return false;
       const [_, action, absenceId] = interaction.customId.split(':');
       const settings = await ensureConfigured(interaction);
       if (!settings) return true;
+
+      if (action === 'declare') {
+        const canDeclare = isAdmin(interaction) || hasRequiredRole(interaction.member, settings.staff_role_id);
+        if (!canDeclare) {
+          await interaction.reply({ content: '❌ Tu dois avoir le rôle staff configuré.', flags: MessageFlags.Ephemeral });
+          return true;
+        }
+
+        const modal = new ModalBuilder().setCustomId('absence:declare_modal').setTitle('Déclarer une absence');
+        const debut = new TextInputBuilder()
+          .setCustomId('debut')
+          .setLabel('Début (YYYY-MM-DD HH:mm)')
+          .setStyle(TextInputStyle.Short)
+          .setRequired(false)
+          .setPlaceholder('Ex: 2026-03-06 09:00 (vide = maintenant)');
+        const fin = new TextInputBuilder()
+          .setCustomId('fin')
+          .setLabel('Fin (YYYY-MM-DD HH:mm)')
+          .setStyle(TextInputStyle.Short)
+          .setRequired(true)
+          .setPlaceholder('Ex: 2026-03-08 18:00');
+        const raison = new TextInputBuilder()
+          .setCustomId('raison')
+          .setLabel('Raison')
+          .setStyle(TextInputStyle.Paragraph)
+          .setRequired(false)
+          .setMaxLength(300);
+
+        modal.addComponents(
+          new ActionRowBuilder().addComponents(debut),
+          new ActionRowBuilder().addComponents(fin),
+          new ActionRowBuilder().addComponents(raison)
+        );
+        await interaction.showModal(modal);
+        return true;
+      }
+
+      if (action === 'retour') return handleRetour(interaction, settings);
+      if (action === 'statut') return handleStatut(interaction);
 
       const canModerate = isAdmin(interaction) || hasRequiredRole(interaction.member, settings.admin_role_id);
       if (!canModerate) {
@@ -271,12 +450,59 @@ function createAbsenceService({ pool }) {
       }
 
       if (action === 'reject') {
-        const out = await rejectAbsence({ guild: interaction.guild, absenceId, byUser: interaction.user, reason: 'Refus via bouton' });
+        const modal = new ModalBuilder().setCustomId(`absence:reject_reason:${absenceId}`).setTitle('Refuser une absence');
+        const motif = new TextInputBuilder()
+          .setCustomId('reason')
+          .setLabel('Motif du refus')
+          .setStyle(TextInputStyle.Paragraph)
+          .setRequired(true)
+          .setMaxLength(300);
+        modal.addComponents(new ActionRowBuilder().addComponents(motif));
+        await interaction.showModal(modal);
+        return true;
+      }
+
+      return false;
+    }
+
+    if (interaction.isModalSubmit()) {
+      if (interaction.customId === 'absence:declare_modal') {
+        const settings = await ensureConfigured(interaction);
+        if (!settings) return true;
+        const canDeclare = isAdmin(interaction) || hasRequiredRole(interaction.member, settings.staff_role_id);
+        if (!canDeclare) {
+          await interaction.reply({ content: '❌ Tu dois avoir le rôle staff configuré.', flags: MessageFlags.Ephemeral });
+          return true;
+        }
+
+        const startInput = interaction.fields.getTextInputValue('debut');
+        const endInput = interaction.fields.getTextInputValue('fin');
+        const reason = interaction.fields.getTextInputValue('raison');
+        return createAbsenceRequest({ interaction, settings, startInput, endInput, reason });
+      }
+
+      if (interaction.customId.startsWith('absence:reject_reason:')) {
+        const settings = await ensureConfigured(interaction);
+        if (!settings) return true;
+        const canModerate = isAdmin(interaction) || hasRequiredRole(interaction.member, settings.admin_role_id);
+        if (!canModerate) {
+          await interaction.reply({ content: '❌ Tu ne peux pas refuser les absences.', flags: MessageFlags.Ephemeral });
+          return true;
+        }
+
+        const absenceId = interaction.customId.split(':')[2];
+        const reason = interaction.fields.getTextInputValue('reason')?.trim();
+        if (!reason) {
+          await interaction.reply({ content: '❌ Le motif est obligatoire.', flags: MessageFlags.Ephemeral });
+          return true;
+        }
+
+        const out = await rejectAbsence({ guild: interaction.guild, absenceId, byUser: interaction.user, reason });
         if (!out.ok) {
           await interaction.reply({ content: `❌ ${out.message}`, flags: MessageFlags.Ephemeral });
           return true;
         }
-        await interaction.reply({ content: `✅ Absence \`${absenceId}\` refusée.`, flags: MessageFlags.Ephemeral });
+        await interaction.reply({ content: `✅ Absence \`${absenceId}\` refusée avec motif.`, flags: MessageFlags.Ephemeral });
         return true;
       }
 
@@ -316,6 +542,33 @@ function createAbsenceService({ pool }) {
       return true;
     }
 
+    if (sub === 'panel') {
+      if (!isAdmin(interaction)) {
+        await interaction.reply({ content: '❌ Commande réservée aux administrateurs.', flags: MessageFlags.Ephemeral });
+        return true;
+      }
+
+      const panelEmbed = new EmbedBuilder()
+        .setTitle('🧾 Panel Absence Staff')
+        .setDescription('Utilise les boutons ci-dessous pour gérer ton absence.')
+        .addFields(
+          { name: 'Déclarer', value: 'Crée une nouvelle demande d\'absence.', inline: false },
+          { name: 'Retour', value: 'Termine/annule ton absence active.', inline: false },
+          { name: 'Statut', value: 'Affiche ton absence active actuelle.', inline: false }
+        )
+        .setColor(0x5865f2);
+
+      const panelRow = new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId('absence:declare').setLabel('Déclarer').setStyle(ButtonStyle.Primary),
+        new ButtonBuilder().setCustomId('absence:retour').setLabel('Retour').setStyle(ButtonStyle.Secondary),
+        new ButtonBuilder().setCustomId('absence:statut').setLabel('Statut').setStyle(ButtonStyle.Success)
+      );
+
+      await interaction.channel.send({ embeds: [panelEmbed], components: [panelRow] });
+      await interaction.reply({ content: '✅ Panel absence envoyé dans ce salon.', flags: MessageFlags.Ephemeral });
+      return true;
+    }
+
     const settings = await ensureConfigured(interaction);
     if (!settings) return true;
 
@@ -329,72 +582,7 @@ function createAbsenceService({ pool }) {
       const endInput = interaction.options.getString('fin', true);
       const startInput = interaction.options.getString('debut', false);
       const reason = interaction.options.getString('raison', false);
-
-      const startAt = parseDateInput(startInput) || new Date();
-      const endAt = parseDateInput(endInput);
-      if (!endAt) {
-        await interaction.reply({ content: '❌ Date de fin invalide. Format attendu: `YYYY-MM-DD HH:mm`.', flags: MessageFlags.Ephemeral });
-        return true;
-      }
-      if (endAt <= startAt) {
-        await interaction.reply({ content: '❌ La date de fin doit être après la date de début.', flags: MessageFlags.Ephemeral });
-        return true;
-      }
-
-      const existing = await pool.query(
-        `SELECT absence_id FROM staff_absences WHERE guild_id=$1 AND user_id=$2 AND status IN ('pending','approved') ORDER BY created_at DESC LIMIT 1`,
-        [interaction.guildId, interaction.user.id]
-      );
-      if (existing.rows[0]) {
-        await interaction.reply({
-          content: `⚠️ Tu as déjà une absence en cours (${existing.rows[0].absence_id}). Termine-la avant d'en créer une autre.`,
-          flags: MessageFlags.Ephemeral,
-        });
-        return true;
-      }
-
-      const absenceId = `abs_${randomUUID().slice(0, 8)}`;
-      await pool.query(
-        `INSERT INTO staff_absences (
-          absence_id, guild_id, user_id, start_at, end_at, reason, status, created_at, updated_at
-        ) VALUES ($1,$2,$3,$4,$5,$6,'pending',NOW(),NOW())`,
-        [absenceId, interaction.guildId, interaction.user.id, startAt.toISOString(), endAt.toISOString(), reason || null]
-      );
-
-      const row = new ActionRowBuilder().addComponents(
-        new ButtonBuilder().setCustomId(`absence:approve:${absenceId}`).setLabel('Approuver').setStyle(ButtonStyle.Success),
-        new ButtonBuilder().setCustomId(`absence:reject:${absenceId}`).setLabel('Refuser').setStyle(ButtonStyle.Danger)
-      );
-
-      const logChannel = await interaction.guild.channels.fetch(settings.log_channel_id).catch(() => null);
-      if (logChannel?.isTextBased()) {
-        const pending = {
-          absence_id: absenceId,
-          user_id: interaction.user.id,
-          start_at: startAt,
-          end_at: endAt,
-          reason: reason || null,
-        };
-        const sent = await logChannel
-          .send({
-            embeds: [buildRequestEmbed(pending, '⏳ En attente de validation admin', 0xf1c40f)],
-            components: [row],
-          })
-          .catch(() => null);
-
-        if (sent?.id) {
-          await pool.query(
-            `UPDATE staff_absences SET log_channel_id=$3, log_message_id=$4, updated_at=NOW() WHERE guild_id=$1 AND absence_id=$2`,
-            [interaction.guildId, absenceId, sent.channelId, sent.id]
-          );
-        }
-      }
-
-      await interaction.reply({
-        content: `✅ Demande envoyée pour validation admin. ID: \`${absenceId}\``,
-        flags: MessageFlags.Ephemeral,
-      });
-      return true;
+      return createAbsenceRequest({ interaction, settings, startInput, endInput, reason });
     }
 
     const canModerate = isAdmin(interaction) || hasRequiredRole(interaction.member, settings.admin_role_id);
@@ -430,65 +618,11 @@ function createAbsenceService({ pool }) {
       return true;
     }
 
-    if (sub === 'retour') {
-      const row = await pool.query(
-        `SELECT * FROM staff_absences WHERE guild_id=$1 AND user_id=$2 AND status IN ('pending','approved') ORDER BY created_at DESC LIMIT 1`,
-        [interaction.guildId, interaction.user.id]
-      );
-      const absence = row.rows[0];
-      if (!absence) {
-        await interaction.reply({ content: 'ℹ️ Tu n\'as pas d\'absence active.', flags: MessageFlags.Ephemeral });
-        return true;
-      }
-
-      const nextStatus = absence.status === 'approved' ? 'ended' : 'cancelled';
-
-      await pool.query(
-        `UPDATE staff_absences SET status=$3, ended_at=NOW(), updated_at=NOW() WHERE guild_id=$1 AND absence_id=$2`,
-        [interaction.guildId, absence.absence_id, nextStatus]
-      );
-
-      if (absence.status === 'approved') {
-        const member = await interaction.guild.members.fetch(interaction.user.id).catch(() => null);
-        if (member && settings.absence_role_id && member.roles.cache.has(settings.absence_role_id)) {
-          await member.roles.remove(settings.absence_role_id, `Retour absence (${absence.absence_id})`).catch(() => {});
-        }
-      }
-
-      await updateDecisionMessage({
-        guild: interaction.guild,
-        absence: { ...absence, status: nextStatus },
-        status: nextStatus,
-        byUser: interaction.user,
-        reason: nextStatus === 'cancelled' ? 'Annulée par le membre via /absence retour' : undefined,
-      });
-
-      const retourMsg =
-        nextStatus === 'cancelled'
-          ? `✅ Demande \`${absence.absence_id}\` annulée.`
-          : `✅ Retour enregistré pour \`${absence.absence_id}\`.`;
-      await interaction.reply({ content: retourMsg, flags: MessageFlags.Ephemeral });
-      return true;
-    }
+    if (sub === 'retour') return handleRetour(interaction, settings);
 
     if (sub === 'statut') {
       const user = interaction.options.getUser('membre', false) || interaction.user;
-      const row = await pool.query(
-        `SELECT * FROM staff_absences WHERE guild_id=$1 AND user_id=$2 AND status IN ('pending','approved') ORDER BY created_at DESC LIMIT 1`,
-        [interaction.guildId, user.id]
-      );
-      const absence = row.rows[0];
-      if (!absence) {
-        await interaction.reply({ content: `ℹ️ ${user} n\'a pas d\'absence active.`, flags: MessageFlags.Ephemeral });
-        return true;
-      }
-
-      const statusTxt = absence.status === 'pending' ? '⏳ En attente de validation' : '✅ Absence approuvée';
-      await interaction.reply({
-        content: `**Statut de ${user}:**\n• ID: \`${absence.absence_id}\`\n• Début: ${formatDate(absence.start_at)}\n• Fin: ${formatDate(absence.end_at)}\n• Statut: ${statusTxt}`,
-        flags: MessageFlags.Ephemeral,
-      });
-      return true;
+      return handleStatut(interaction, user);
     }
 
     return false;
