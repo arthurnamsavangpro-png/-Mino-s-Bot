@@ -41,6 +41,30 @@ function hasRequiredRole(member, roleId) {
   return member?.roles?.cache?.has(roleId) || false;
 }
 
+function buildRequestEmbed(absence, title, color, extra = {}) {
+  const embed = new EmbedBuilder()
+    .setTitle('🗓️ Demande d\'absence staff')
+    .setColor(color)
+    .setDescription(title)
+    .addFields(
+      { name: 'ID', value: `\`${absence.absence_id}\``, inline: true },
+      { name: 'Membre', value: `<@${absence.user_id}>`, inline: true },
+      { name: 'Début', value: formatDate(absence.start_at), inline: true },
+      { name: 'Fin', value: formatDate(absence.end_at), inline: true },
+      { name: 'Raison', value: absence.reason || 'Non précisée', inline: false }
+    )
+    .setTimestamp(new Date());
+
+  if (extra.byUser) {
+    embed.addFields({ name: 'Action par', value: `<@${extra.byUser.id}>`, inline: true });
+  }
+  if (extra.reason) {
+    embed.addFields({ name: 'Motif', value: extra.reason, inline: false });
+  }
+
+  return embed;
+}
+
 function createAbsenceService({ pool }) {
   const commands = [
     new SlashCommandBuilder()
@@ -152,6 +176,55 @@ function createAbsenceService({ pool }) {
     await notifyMemberDecision({ guild, absence: fresh, byUser, approved: true });
 
     return { ok: true, absence: fresh };
+  }
+
+  async function updateDecisionMessage({ guild, absence, status, byUser, reason }) {
+    const row = await pool.query(
+      `SELECT log_channel_id, log_message_id FROM staff_absences WHERE guild_id=$1 AND absence_id=$2`,
+      [guild.id, absence.absence_id]
+    );
+    const logChannelId = absence.log_channel_id || row.rows[0]?.log_channel_id;
+    const logMessageId = absence.log_message_id || row.rows[0]?.log_message_id;
+    if (!logChannelId || !logMessageId) return;
+
+    const channel = await guild.channels.fetch(logChannelId).catch(() => null);
+    if (!channel?.isTextBased()) return;
+    const message = await channel.messages.fetch(logMessageId).catch(() => null);
+    if (!message) return;
+
+    let title = '⏳ En attente de validation admin';
+    let color = 0xf1c40f;
+    if (status === 'approved') {
+      title = '✅ Absence approuvée';
+      color = 0x2ecc71;
+    } else if (status === 'rejected') {
+      title = '❌ Absence refusée';
+      color = 0xe74c3c;
+    } else if (status === 'cancelled' || status === 'ended') {
+      title = '🛑 Absence clôturée';
+      color = 0x95a5a6;
+    }
+
+    await message.edit({
+      embeds: [buildRequestEmbed(absence, title, color, { byUser, reason })],
+      components: [],
+    }).catch(() => {});
+  }
+
+  async function notifyMemberDecision({ guild, absence, byUser, approved, reason }) {
+    const user = await guild.client.users.fetch(absence.user_id).catch(() => null);
+    if (!user) return;
+
+    const verdict = approved ? '✅ **approuvée**' : '❌ **refusée**';
+    const msg = [
+      `Ta demande d'absence \`${absence.absence_id}\` a été ${verdict}.`,
+      `• Début: ${new Date(absence.start_at).toLocaleString('fr-FR')}`,
+      `• Fin: ${new Date(absence.end_at).toLocaleString('fr-FR')}`,
+      `• Décision par: <@${byUser.id}>`,
+    ];
+    if (reason) msg.push(`• Motif: ${reason}`);
+
+    await user.send({ content: msg.join('\n') }).catch(() => {});
   }
 
   async function rejectAbsence({ guild, absenceId, byUser, reason }) {
@@ -359,26 +432,42 @@ function createAbsenceService({ pool }) {
 
     if (sub === 'retour') {
       const row = await pool.query(
-        `SELECT * FROM staff_absences WHERE guild_id=$1 AND user_id=$2 AND status='approved' ORDER BY created_at DESC LIMIT 1`,
+        `SELECT * FROM staff_absences WHERE guild_id=$1 AND user_id=$2 AND status IN ('pending','approved') ORDER BY created_at DESC LIMIT 1`,
         [interaction.guildId, interaction.user.id]
       );
       const absence = row.rows[0];
       if (!absence) {
-        await interaction.reply({ content: 'ℹ️ Tu n\'as pas d\'absence approuvée active.', flags: MessageFlags.Ephemeral });
+        await interaction.reply({ content: 'ℹ️ Tu n\'as pas d\'absence active.', flags: MessageFlags.Ephemeral });
         return true;
       }
 
+      const nextStatus = absence.status === 'approved' ? 'ended' : 'cancelled';
+
       await pool.query(
-        `UPDATE staff_absences SET status='ended', ended_at=NOW(), updated_at=NOW() WHERE guild_id=$1 AND absence_id=$2`,
-        [interaction.guildId, absence.absence_id]
+        `UPDATE staff_absences SET status=$3, ended_at=NOW(), updated_at=NOW() WHERE guild_id=$1 AND absence_id=$2`,
+        [interaction.guildId, absence.absence_id, nextStatus]
       );
 
-      const member = await interaction.guild.members.fetch(interaction.user.id).catch(() => null);
-      if (member && settings.absence_role_id && member.roles.cache.has(settings.absence_role_id)) {
-        await member.roles.remove(settings.absence_role_id, `Retour absence (${absence.absence_id})`).catch(() => {});
+      if (absence.status === 'approved') {
+        const member = await interaction.guild.members.fetch(interaction.user.id).catch(() => null);
+        if (member && settings.absence_role_id && member.roles.cache.has(settings.absence_role_id)) {
+          await member.roles.remove(settings.absence_role_id, `Retour absence (${absence.absence_id})`).catch(() => {});
+        }
       }
 
-      await interaction.reply({ content: `✅ Retour enregistré pour \`${absence.absence_id}\`.`, flags: MessageFlags.Ephemeral });
+      await updateDecisionMessage({
+        guild: interaction.guild,
+        absence: { ...absence, status: nextStatus },
+        status: nextStatus,
+        byUser: interaction.user,
+        reason: nextStatus === 'cancelled' ? 'Annulée par le membre via /absence retour' : undefined,
+      });
+
+      const retourMsg =
+        nextStatus === 'cancelled'
+          ? `✅ Demande \`${absence.absence_id}\` annulée.`
+          : `✅ Retour enregistré pour \`${absence.absence_id}\`.`;
+      await interaction.reply({ content: retourMsg, flags: MessageFlags.Ephemeral });
       return true;
     }
 
