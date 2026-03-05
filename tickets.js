@@ -2386,6 +2386,7 @@ function createTicketsService({ pool, config }) {
       .setTimestamp();
 
     if (s.thumb && isValidHttpUrl(s.thumb)) e.setThumbnail(s.thumb);
+    if (draft.banner && isValidHttpUrl(draft.banner)) e.setImage(draft.banner);
 
     const embeds = [];
     if (draft.banner && isValidHttpUrl(draft.banner) && draft.banner_position === "top") embeds.push(buildTopBannerEmbed(draft.banner));
