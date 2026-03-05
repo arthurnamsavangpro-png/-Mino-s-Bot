@@ -335,9 +335,13 @@ async function initDb() {
       approved_at TIMESTAMPTZ,
       decision_reason TEXT,
       ended_at TIMESTAMPTZ,
+      log_channel_id TEXT,
+      log_message_id TEXT,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
+    ALTER TABLE staff_absences ADD COLUMN IF NOT EXISTS log_channel_id TEXT;
+    ALTER TABLE staff_absences ADD COLUMN IF NOT EXISTS log_message_id TEXT;
     CREATE INDEX IF NOT EXISTS idx_staff_absences_guild_user_status ON staff_absences (guild_id, user_id, status);
     CREATE INDEX IF NOT EXISTS idx_staff_absences_guild_status_end ON staff_absences (guild_id, status, end_at);
 
