@@ -41,78 +41,6 @@ function hasRequiredRole(member, roleId) {
   return member?.roles?.cache?.has(roleId) || false;
 }
 
-function buildRequestEmbed(absence, statusText, color, moderatorLabel, decisionReason) {
-  const embed = new EmbedBuilder()
-    .setColor(color)
-    .setTitle('📝 Demande d\'absence staff')
-    .setDescription(`ID: \`${absence.absence_id}\``)
-    .addFields(
-      { name: 'Membre', value: `<@${absence.user_id}>`, inline: true },
-      { name: 'Début', value: formatDate(absence.start_at), inline: true },
-      { name: 'Fin', value: formatDate(absence.end_at), inline: true },
-      { name: 'Raison', value: absence.reason || 'Non précisée', inline: false },
-      { name: 'Statut', value: statusText, inline: false }
-    )
-    .setTimestamp();
-
-  if (moderatorLabel) {
-    embed.addFields({ name: 'Décision par', value: moderatorLabel, inline: true });
-  }
-  if (decisionReason) {
-    embed.addFields({ name: 'Motif de refus', value: decisionReason, inline: false });
-  }
-
-  return embed;
-}
-
-function disabledDecisionRow(absenceId) {
-  return new ActionRowBuilder().addComponents(
-    new ButtonBuilder()
-      .setCustomId(`absence:approve:${absenceId}`)
-      .setLabel('Approuver')
-      .setStyle(ButtonStyle.Success)
-      .setDisabled(true),
-    new ButtonBuilder()
-      .setCustomId(`absence:reject:${absenceId}`)
-      .setLabel('Refuser')
-      .setStyle(ButtonStyle.Danger)
-      .setDisabled(true)
-  );
-}
-
-async function updateDecisionMessage({ guild, absence, status, byUser, reason }) {
-  if (!absence.log_channel_id || !absence.log_message_id) return;
-  const channel = await guild.channels.fetch(absence.log_channel_id).catch(() => null);
-  if (!channel?.isTextBased()) return;
-
-  const msg = await channel.messages.fetch(absence.log_message_id).catch(() => null);
-  if (!msg) return;
-
-  const approved = status === 'approved';
-  const embed = buildRequestEmbed(
-    { ...absence, status },
-    approved ? '✅ Approuvée' : '❌ Refusée',
-    approved ? 0x2ecc71 : 0xe74c3c,
-    `<@${byUser.id}>`,
-    approved ? null : reason || absence.decision_reason || null
-  );
-
-  await msg.edit({ embeds: [embed], components: [disabledDecisionRow(absence.absence_id)] }).catch(() => {});
-}
-
-async function notifyMemberDecision({ guild, absence, byUser, approved, reason }) {
-  const user = await guild.client.users.fetch(absence.user_id).catch(() => null);
-  if (!user) return;
-
-  const content = approved
-    ? `✅ Ton absence \`${absence.absence_id}\` a été **approuvée** par **${byUser.tag}**.`
-    : `❌ Ton absence \`${absence.absence_id}\` a été **refusée** par **${byUser.tag}**${
-        reason ? `\nMotif: ${reason}` : ''
-      }.`;
-
-  await user.send({ content }).catch(() => {});
-}
-
 function createAbsenceService({ pool }) {
   const commands = [
     new SlashCommandBuilder()
@@ -140,7 +68,10 @@ function createAbsenceService({ pool }) {
           .setName('declare')
           .setDescription('Déclare une absence (soumise à validation admin)')
           .addStringOption((opt) =>
-            opt.setName('fin').setDescription('Date de fin (YYYY-MM-DD HH:mm)').setRequired(true)
+            opt
+              .setName('fin')
+              .setDescription('Date de fin (YYYY-MM-DD HH:mm)')
+              .setRequired(true)
           )
           .addStringOption((opt) =>
             opt
@@ -149,25 +80,35 @@ function createAbsenceService({ pool }) {
               .setRequired(false)
           )
           .addStringOption((opt) =>
-            opt.setName('raison').setDescription('Raison de l\'absence').setRequired(false).setMaxLength(300)
+            opt
+              .setName('raison')
+              .setDescription('Raison de l\'absence')
+              .setRequired(false)
+              .setMaxLength(300)
           )
       )
       .addSubcommand((sc) =>
         sc
           .setName('approve')
           .setDescription('Approuver une demande d\'absence (admin)')
-          .addStringOption((opt) => opt.setName('absence_id').setDescription('ID de la demande').setRequired(true))
+          .addStringOption((opt) =>
+            opt.setName('absence_id').setDescription('ID de la demande').setRequired(true)
+          )
       )
       .addSubcommand((sc) =>
         sc
           .setName('reject')
           .setDescription('Refuser une demande d\'absence (admin)')
-          .addStringOption((opt) => opt.setName('absence_id').setDescription('ID de la demande').setRequired(true))
+          .addStringOption((opt) =>
+            opt.setName('absence_id').setDescription('ID de la demande').setRequired(true)
+          )
           .addStringOption((opt) =>
             opt.setName('raison').setDescription('Raison du refus').setRequired(false).setMaxLength(300)
           )
       )
-      .addSubcommand((sc) => sc.setName('retour').setDescription('Signaler son retour (retire le rôle absence)'))
+      .addSubcommand((sc) =>
+        sc.setName('retour').setDescription('Signaler son retour (retire le rôle absence)')
+      )
       .addSubcommand((sc) =>
         sc
           .setName('statut')
