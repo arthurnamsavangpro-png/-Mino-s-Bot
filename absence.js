@@ -143,6 +143,9 @@ function createAbsenceService({ pool }) {
           .addUserOption((opt) => opt.setName('membre').setDescription('Membre ciblé').setRequired(false))
       )
       .addSubcommand((sc) =>
+        sc.setName('liste').setDescription('Voir la liste des utilisateurs actuellement absents')
+      )
+      .addSubcommand((sc) =>
         sc.setName('panel').setDescription('Créer le panel d\'absence dans le salon courant (admin)')
       ),
   ];
@@ -398,6 +401,38 @@ function createAbsenceService({ pool }) {
 • Début: ${formatDate(absence.start_at)}
 • Fin: ${formatDate(absence.end_at)}
 • Statut: ${statusTxt}`,
+      flags: MessageFlags.Ephemeral,
+    });
+    return true;
+  }
+
+  async function handleListe(interaction) {
+    const rows = await pool.query(
+      `SELECT absence_id, user_id, start_at, end_at
+       FROM staff_absences
+       WHERE guild_id=$1
+         AND status='approved'
+         AND start_at <= NOW()
+         AND end_at >= NOW()
+       ORDER BY end_at ASC`,
+      [interaction.guildId]
+    );
+
+    if (!rows.rows.length) {
+      await interaction.reply({
+        content: 'ℹ️ Aucun utilisateur n\'est actuellement absent.',
+        flags: MessageFlags.Ephemeral,
+      });
+      return true;
+    }
+
+    const list = rows.rows
+      .slice(0, 25)
+      .map((absence, index) => `${index + 1}. <@${absence.user_id}> — fin: ${formatDate(absence.end_at)} (\`${absence.absence_id}\`)`)
+      .join('\n');
+
+    await interaction.reply({
+      content: `**📋 Utilisateurs actuellement absents (${rows.rows.length})**\n${list}`,
       flags: MessageFlags.Ephemeral,
     });
     return true;
@@ -659,6 +694,8 @@ function createAbsenceService({ pool }) {
       const user = interaction.options.getUser('membre', false) || interaction.user;
       return handleStatut(interaction, user);
     }
+
+    if (sub === 'liste') return handleListe(interaction);
 
     return false;
   }
