@@ -594,9 +594,9 @@ function createAbsenceService({ pool }) {
         .setTimestamp(new Date());
 
       const panelRow = new ActionRowBuilder().addComponents(
-        new ButtonBuilder().setCustomId('absence:declare').setLabel('Déclarer').setEmoji('📝').setStyle(ButtonStyle.Primary),
+        new ButtonBuilder().setCustomId('absence:declare').setLabel('Déclarer une absence').setEmoji('📝').setStyle(ButtonStyle.Primary),
         new ButtonBuilder().setCustomId('absence:retour').setLabel('🔙 Signaler ton retour').setStyle(ButtonStyle.Success),
-        new ButtonBuilder().setCustomId('absence:statut').setLabel('🟡 Statut').setStyle(ButtonStyle.Secondary)
+        new ButtonBuilder().setCustomId('absence:statut').setLabel('📊 Statut').setStyle(ButtonStyle.Destructive)
       );
 
       await interaction.channel.send({ embeds: [panelEmbed], components: [panelRow] });
