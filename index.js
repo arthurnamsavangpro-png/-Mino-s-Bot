@@ -274,6 +274,11 @@ async function initDb() {
       log_events JSONB NOT NULL DEFAULT '{}'::jsonb,
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
+    CREATE TABLE IF NOT EXISTS autorole_settings (
+      guild_id TEXT PRIMARY KEY,
+      role_id TEXT,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
     CREATE TABLE IF NOT EXISTS mod_case_counters (
       guild_id TEXT PRIMARY KEY,
       last_case BIGINT NOT NULL DEFAULT 0
@@ -584,6 +589,7 @@ client.on("messageCreate", async (message) => {
 client.on("guildMemberAdd", async (member) => {
   try {
     await automod.handleGuildMemberAdd(member, client);
+    await moderation.handleGuildMemberAdd?.(member, client);
   } catch (e) {
     console.error("guildMemberAdd fatal:", e);
   }

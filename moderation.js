@@ -370,6 +370,39 @@ function createModerationService({ pool, config }) {
           .setMaxLength(200)
       ),
 
+    // /autorole
+    new SlashCommandBuilder()
+      .setName('autorole')
+      .setDescription('Définir le rôle automatique pour les nouveaux membres')
+      .addSubcommand((sc) =>
+        sc
+          .setName('set')
+          .setDescription('Définir le rôle automatique')
+          .addRoleOption((opt) =>
+            opt.setName('role').setDescription('Rôle à attribuer').setRequired(true)
+          )
+      )
+      .addSubcommand((sc) =>
+        sc.setName('off').setDescription('Désactiver le rôle automatique')
+      )
+      .addSubcommand((sc) =>
+        sc.setName('status').setDescription('Voir le rôle automatique actuel')
+      ),
+
+    // /forcerole
+    new SlashCommandBuilder()
+      .setName('forcerole')
+      .setDescription('Attribuer un rôle à tout le serveur (force all)')
+      .addRoleOption((opt) =>
+        opt.setName('role').setDescription('Rôle à donner à tout le monde').setRequired(true)
+      )
+      .addBooleanOption((opt) =>
+        opt
+          .setName('ignorer_bots')
+          .setDescription('Ignorer les bots (par défaut: oui)')
+          .setRequired(false)
+      ),
+
     // /log
     new SlashCommandBuilder()
       .setName('log')
@@ -543,8 +576,34 @@ function createModerationService({ pool, config }) {
       [guildId, next.modlog_channel_id, next.staff_role_id, JSON.stringify(next.log_events)]
     );
 
+
+
     return next;
   }
+
+  async function getAutoroleSettings(guildId) {
+    const res = await pool.query(
+      `SELECT role_id FROM autorole_settings WHERE guild_id=$1 LIMIT 1`,
+      [guildId]
+    );
+    return {
+      role_id: res.rows[0]?.role_id || null,
+    };
+  }
+
+  async function saveAutoroleSettings(guildId, roleId) {
+    await pool.query(
+      `INSERT INTO autorole_settings (guild_id, role_id)
+       VALUES ($1,$2)
+       ON CONFLICT (guild_id) DO UPDATE
+         SET role_id=EXCLUDED.role_id,
+             updated_at=NOW()`,
+      [guildId, roleId || null]
+    );
+
+    return { role_id: roleId || null };
+  }
+
 
   async function sendModLog(guild, settings, embed) {
     if (!settings?.modlog_channel_id) return null;
@@ -1859,6 +1918,180 @@ function createModerationService({ pool, config }) {
     return true;
   }
 
+
+
+  async function handleAutorole(interaction, client) {
+    const settings = await getSettings(interaction.guildId);
+
+    if (!mustHave(interaction, PermissionsBitField.Flags.ManageRoles, settings.staff_role_id)) {
+      await interaction.reply({
+        content: '⛔ Il faut la permission **Gérer les rôles** (ou être staff) pour faire ça.',
+        ephemeral: true,
+      });
+      return true;
+    }
+
+    const sub = interaction.options.getSubcommand();
+
+    if (sub === 'status') {
+      const auto = await getAutoroleSettings(interaction.guildId);
+      const roleText = auto.role_id ? `<@&${auto.role_id}>` : 'Aucun rôle configuré';
+      await interaction.reply({
+        content: `⚙️ Auto-rôle actuel: ${roleText}`,
+        ephemeral: true,
+      });
+      return true;
+    }
+
+    if (sub === 'off') {
+      await saveAutoroleSettings(interaction.guildId, null);
+      await interaction.reply({
+        content: '✅ Auto-rôle désactivé.',
+        ephemeral: true,
+      });
+      return true;
+    }
+
+    const role = interaction.options.getRole('role', true);
+    const guild = interaction.guild;
+    if (!guild) {
+      await interaction.reply({ content: '⚠️ Serveur introuvable.', ephemeral: true });
+      return true;
+    }
+
+    const me = await guild.members.fetchMe().catch(() => null);
+    if (!me) {
+      await interaction.reply({ content: '⚠️ Bot introuvable.', ephemeral: true });
+      return true;
+    }
+
+    if (role.managed) {
+      await interaction.reply({
+        content: '⚠️ Ce rôle est géré par une intégration, je ne peux pas le donner.',
+        ephemeral: true,
+      });
+      return true;
+    }
+
+    if (me.roles.highest.comparePositionTo(role) <= 0) {
+      await interaction.reply({
+        content: '⚠️ Le rôle du bot doit être au-dessus du rôle cible.',
+        ephemeral: true,
+      });
+      return true;
+    }
+
+    await saveAutoroleSettings(interaction.guildId, role.id);
+    await interaction.reply({
+      content: `✅ Auto-rôle défini sur ${role}.`,
+      ephemeral: true,
+    });
+    return true;
+  }
+
+  async function handleForceRole(interaction, client) {
+    const settings = await getSettings(interaction.guildId);
+
+    if (!mustHave(interaction, PermissionsBitField.Flags.ManageRoles, settings.staff_role_id)) {
+      await interaction.reply({
+        content: '⛔ Il faut la permission **Gérer les rôles** (ou être staff) pour faire ça.',
+        ephemeral: true,
+      });
+      return true;
+    }
+
+    const role = interaction.options.getRole('role', true);
+    const ignoreBots = interaction.options.getBoolean('ignorer_bots') ?? true;
+    const guild = interaction.guild;
+    if (!guild) {
+      await interaction.reply({ content: '⚠️ Serveur introuvable.', ephemeral: true });
+      return true;
+    }
+
+    if (role.managed) {
+      await interaction.reply({
+        content: '⚠️ Ce rôle est géré par une intégration, je ne peux pas le donner.',
+        ephemeral: true,
+      });
+      return true;
+    }
+
+    const me = await guild.members.fetchMe().catch(() => null);
+    if (!me) {
+      await interaction.reply({ content: '⚠️ Bot introuvable.', ephemeral: true });
+      return true;
+    }
+
+    if (me.roles.highest.comparePositionTo(role) <= 0) {
+      await interaction.reply({
+        content: '⚠️ Le rôle du bot doit être au-dessus du rôle cible.',
+        ephemeral: true,
+      });
+      return true;
+    }
+
+    await interaction.deferReply({ ephemeral: true });
+
+    const members = await guild.members.fetch();
+    let success = 0;
+    let skipped = 0;
+    let failed = 0;
+
+    for (const member of members.values()) {
+      if (ignoreBots && member.user.bot) {
+        skipped += 1;
+        continue;
+      }
+      if (member.roles.cache.has(role.id)) {
+        skipped += 1;
+        continue;
+      }
+      if (member.id === guild.ownerId) {
+        skipped += 1;
+        continue;
+      }
+      if (me.roles.highest.comparePositionTo(member.roles.highest) <= 0) {
+        skipped += 1;
+        continue;
+      }
+
+      try {
+        await member.roles.add(role, `Force role par ${interaction.user.tag}`);
+        success += 1;
+      } catch {
+        failed += 1;
+      }
+    }
+
+    await interaction.editReply(
+      `✅ Forcerole terminé pour ${role}.
+` +
+        `• Ajoutés: **${success}**
+` +
+        `• Ignorés: **${skipped}**
+` +
+        `• Erreurs: **${failed}**`
+    );
+    return true;
+  }
+
+  async function handleGuildMemberAdd(member, client) {
+    if (!member?.guild) return false;
+
+    const auto = await getAutoroleSettings(member.guild.id);
+    if (!auto.role_id) return false;
+
+    const role = await member.guild.roles.fetch(auto.role_id).catch(() => null);
+    if (!role || role.managed) return false;
+
+    const me = await member.guild.members.fetchMe().catch(() => null);
+    if (!me) return false;
+    if (me.roles.highest.comparePositionTo(role) <= 0) return false;
+
+    await member.roles.add(role, "Auto-rôle à l'arrivée").catch(() => null);
+    return false;
+  }
+
   async function handleInteraction(interaction, client) {
     if (!interaction.isChatInputCommand()) return false;
 
@@ -1871,6 +2104,8 @@ function createModerationService({ pool, config }) {
     if (name === 'warn') return handleWarn(interaction, client);
     if (name === 'purge' || name === 'clear') return handlePurge(interaction, client);
     if (name === 'log') return handleLog(interaction, client);
+    if (name === 'autorole') return handleAutorole(interaction, client);
+    if (name === 'forcerole') return handleForceRole(interaction, client);
 
     return false;
   }
@@ -1879,6 +2114,7 @@ function createModerationService({ pool, config }) {
     commands,
     handleInteraction,
     handleMessage,
+    handleGuildMemberAdd,
   };
 }
 
