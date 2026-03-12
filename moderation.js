@@ -973,7 +973,152 @@ function createModerationService({ pool, config }) {
       if (!message.guild || !message.member) return false;
 
       const content = String(message.content || '');
-      if (!content.startsWith('.')) return false;
+      if (!content.startsWith('.') && !content.startsWith('+')) return false;
+
+      if (content.startsWith('+')) {
+        const plusParts = content.slice(1).trim().split(/\s+/);
+        const plusCmd = (plusParts.shift() || '').toLowerCase();
+
+        if (plusCmd === 'warn') {
+          const settings = await getSettings(message.guild.id);
+          const canWarn =
+            message.member.permissions.has(PermissionsBitField.Flags.ModerateMembers) ||
+            message.member.permissions.has(PermissionsBitField.Flags.Administrator) ||
+            hasRole(message.member, settings.staff_role_id);
+
+          if (!canWarn) {
+            await message.reply('⛔ Il faut la permission **Modérer des membres** (ou être staff) pour faire ça.');
+            return true;
+          }
+
+          const targetUser = message.mentions.users.first();
+          if (!targetUser) {
+            await message.reply('⚠️ Utilisation: `+warn @membre [raison]`');
+            return true;
+          }
+
+          if (targetUser.id === message.author.id) {
+            await message.reply('⚠️ Tu ne peux pas te warn toi-même.');
+            return true;
+          }
+
+          const reason = plusParts
+            .filter((p) => !/^<@!?\d+>$/.test(p))
+            .join(' ')
+            .trim() || 'Aucune raison fournie';
+          const moderatorTag = fmtUserTag(message.author, message.author.tag);
+
+          try {
+            const caseId = await insertCase({
+              guildId: message.guild.id,
+              action: 'WARN',
+              targetId: targetUser.id,
+              targetTag: targetUser.tag || null,
+              moderatorId: message.author.id,
+              moderatorTag,
+              reason,
+              durationMs: null,
+              metadata: { source: 'prefix:+warn' },
+              logChannelId: settings.modlog_channel_id || null,
+              logMessageId: null,
+            });
+
+            const warnEmbed = redEmbed()
+              .setTitle('⚠️ Warn ajouté')
+              .setDescription(`Un avertissement a été ajouté à <@${targetUser.id}>.`)
+              .addFields(
+                { name: 'Membre', value: `<@${targetUser.id}> (${targetUser.id})`, inline: false },
+                { name: 'Modérateur', value: `<@${message.author.id}>`, inline: true },
+                { name: 'Case ID', value: `#${caseId}`, inline: true },
+                { name: 'Raison', value: reason, inline: false }
+              );
+
+            await message.reply({ embeds: [warnEmbed] });
+            return true;
+          } catch (e) {
+            console.error('prefix +warn error:', e);
+            await message.reply('⚠️ Warn non enregistré (erreur DB).');
+            return true;
+          }
+        }
+
+        if (plusCmd === 'ban') {
+          const canBan =
+            message.member.permissions.has(PermissionsBitField.Flags.BanMembers) ||
+            message.member.permissions.has(PermissionsBitField.Flags.Administrator);
+          if (!canBan) {
+            await message.reply('⛔ Il faut la permission **Bannir des membres** pour faire ça.');
+            return true;
+          }
+
+          const targetUser = message.mentions.users.first();
+          if (!targetUser) {
+            await message.reply('⚠️ Utilisation: `+ban @membre [raison]`');
+            return true;
+          }
+
+          if (targetUser.id === message.author.id) {
+            await message.reply('⚠️ Tu ne peux pas te bannir toi-même.');
+            return true;
+          }
+
+          const targetMember = await message.guild.members.fetch(targetUser.id).catch(() => null);
+          if (!targetMember) {
+            await message.reply('⚠️ Membre introuvable.');
+            return true;
+          }
+
+          const me = await message.guild.members.fetchMe().catch(() => null);
+          if (me && !targetMember.bannable) {
+            await message.reply('⚠️ Je ne peux pas bannir ce membre (hiérarchie/permissions).');
+            return true;
+          }
+
+          if (!message.member.permissions.has(PermissionsBitField.Flags.Administrator)) {
+            if (message.member.roles.highest.comparePositionTo(targetMember.roles.highest) <= 0) {
+              await message.reply('⚠️ Tu ne peux pas bannir quelqu’un au-dessus (ou égal) à ton rôle.');
+              return true;
+            }
+          }
+
+          const reason = plusParts
+            .filter((p) => !/^<@!?\d+>$/.test(p))
+            .join(' ')
+            .trim() || 'Aucune raison fournie';
+          const moderatorTag = fmtUserTag(message.author, message.author.tag);
+          const banReason = safeReason(reason, moderatorTag);
+
+          try {
+            await message.guild.members.ban(targetUser.id, {
+              deleteMessageSeconds: 0,
+              reason: banReason,
+            });
+
+            const caseId = await insertCase({
+              guildId: message.guild.id,
+              action: 'BAN',
+              targetId: targetUser.id,
+              targetTag: targetUser.tag || null,
+              moderatorId: message.author.id,
+              moderatorTag,
+              reason,
+              durationMs: null,
+              metadata: { delete_days: 0, source: 'prefix:+ban' },
+              logChannelId: null,
+              logMessageId: null,
+            });
+
+            await message.reply(`✅ Ban effectué sur <@${targetUser.id}>. Case **#${caseId}**.`);
+            return true;
+          } catch (e) {
+            console.error('prefix +ban error:', e);
+            await message.reply('⚠️ Impossible de bannir (permissions/hiérarchie/erreur API).');
+            return true;
+          }
+        }
+
+        return false;
+      }
 
       const parts = content.slice(1).trim().split(/\s+/);
       const cmd = (parts.shift() || '').toLowerCase();
