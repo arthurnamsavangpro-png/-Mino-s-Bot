@@ -361,9 +361,11 @@ async function initDb() {
     CREATE TABLE IF NOT EXISTS invite_settings (
       guild_id TEXT PRIMARY KEY,
       log_channel_id TEXT,
+      announce_channel_id TEXT,
       fake_min_account_days INTEGER NOT NULL DEFAULT 7,
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
+    ALTER TABLE invite_settings ADD COLUMN IF NOT EXISTS announce_channel_id TEXT;
 
     CREATE TABLE IF NOT EXISTS invite_stats (
       guild_id TEXT NOT NULL,
