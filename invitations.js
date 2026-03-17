@@ -10,7 +10,7 @@ function createInvitationsService({ pool }) {
 
   const commands = [
     new SlashCommandBuilder()
-      .setName('invites')
+      .setName('invite')
       .setDescription('Système d\'invitations avancé (profil, classement, rewards, admin)')
       .addSubcommand((sub) =>
         sub
@@ -344,7 +344,7 @@ function createInvitationsService({ pool }) {
   }
 
   async function handleInteraction(interaction) {
-    if (!interaction.isChatInputCommand() || interaction.commandName !== 'invites') return false;
+    if (!interaction.isChatInputCommand() || interaction.commandName !== 'invite') return false;
     if (!interaction.guildId) {
       await interaction.reply({ content: '⚠️ Commande disponible uniquement en serveur.', flags: MessageFlags.Ephemeral });
       return true;

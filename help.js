@@ -230,7 +230,7 @@ function createHelpService({ services }) {
       label: "Invitations",
       short: "Tracking & rewards",
       description: "Système d'invites avancé : profil, leaderboard, rewards, logs et actions admin.",
-      examples: ["/invites profil", "/invites leaderboard", "/invites rewards", "/invites setreward"],
+      examples: ["/invite profil", "/invite leaderboard", "/invite rewards", "/invite setreward"],
       serviceKeys: ["invitations"],
     },
     {
