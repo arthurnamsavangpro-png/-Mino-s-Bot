@@ -115,10 +115,6 @@ const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: process.env.NODE_ENV === "production" ? { rejectUnauthorized: false } : false,
 });
-const DB_RETRY_MS = Number(process.env.DB_RETRY_MS || 30000);
-let dbBootstrapped = false;
-
-
 async function initDb() {
   await pool.query(`
     /* --- vouches --- */
@@ -520,10 +516,6 @@ async function registerCommands() {
   try {
     if (COMMANDS_SCOPE === "global") {
       await putGlobal();
-      if (GUILD_ID) {
-        await putGuild(GUILD_ID);
-        console.log("ℹ️ Bonus: commandes aussi poussées en GUILD pour apparition instantanée.");
-      }
       return;
     }
 
@@ -582,12 +574,10 @@ client.once("clientReady", async () => {
   updatePresence(); // 🔥 direct
   setInterval(updatePresence, 15_000); // toutes les 15s
 
-  async function tryDbBootstrap() {
-    if (dbBootstrapped) return;
-    try {
-      await initDb();
-      dbBootstrapped = true;
-      console.log("✅ DB connectée, activation des tâches dépendantes DB.");
+  try {
+    await initDb();
+    await registerCommands();
+    await invitations.primeCache(client);
 
       // vouchboard init + refresh
       for (const g of client.guilds.cache.values()) {
