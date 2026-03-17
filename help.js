@@ -225,6 +225,15 @@ function createHelpService({ services }) {
       serviceKeys: ["sendMessage"],
     },
     {
+      key: "invitations",
+      emoji: "📨",
+      label: "Invitations",
+      short: "Tracking & rewards",
+      description: "Système d'invites avancé : profil, leaderboard, rewards, logs et actions admin.",
+      examples: ["/invites profil", "/invites leaderboard", "/invites rewards", "/invites setreward"],
+      serviceKeys: ["invitations"],
+    },
+    {
       key: "absence",
       emoji: "🛫",
       label: "Absences Staff",
@@ -240,7 +249,7 @@ function createHelpService({ services }) {
       short: "Liste complète",
       description: "Affiche une vue compacte de toutes les commandes détectées.",
       examples: ["/help"],
-      serviceKeys: ["vouches", "rankup", "modrank", "tickets", "giveaways", "moderation", "automod", "updates", "absence", "worl", "sendMessage"],
+      serviceKeys: ["vouches", "rankup", "modrank", "tickets", "giveaways", "moderation", "automod", "updates", "invitations", "absence", "worl", "sendMessage"],
     },
   ];
 
