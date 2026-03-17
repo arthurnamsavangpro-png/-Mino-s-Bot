@@ -579,14 +579,26 @@ client.once("clientReady", async () => {
     await registerCommands();
     await invitations.primeCache(client);
 
-    // vouchboard init + refresh
-    for (const g of client.guilds.cache.values()) {
-      await vouches.updateVouchboardMessage(client, g.id).catch(() => {});
-    }
-    vouches.startGlobalVouchboardUpdater(client);
+      // vouchboard init + refresh
+      for (const g of client.guilds.cache.values()) {
+        await vouches.updateVouchboardMessage(client, g.id).catch(() => {});
+      }
+      vouches.startGlobalVouchboardUpdater(client);
 
-    // giveaways sweeper
-    giveaways.startGlobalGiveawaySweeper(client);
+      // giveaways sweeper
+      giveaways.startGlobalGiveawaySweeper(client);
+    } catch (err) {
+      console.error("❌ DB indisponible au démarrage (mode dégradé).", err?.message || err);
+      setTimeout(() => {
+        tryDbBootstrap().catch(() => {});
+      }, DB_RETRY_MS);
+    }
+  }
+
+  try {
+    await registerCommands();
+    await invitations.primeCache(client);
+    await tryDbBootstrap();
   } catch (err) {
     console.error("Erreur au démarrage:", err);
     process.exit(1);
