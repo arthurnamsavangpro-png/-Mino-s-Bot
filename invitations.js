@@ -36,6 +36,27 @@ function createInvitationsService({ pool }) {
       .addSubcommand((sub) => sub.setName('rewards').setDescription('Voir les paliers de récompenses'))
       .addSubcommand((sub) =>
         sub
+          .setName('annonce')
+          .setDescription("Annonce publiquement qui a invité un membre et son total net")
+          .addUserOption((opt) =>
+            opt.setName('membre').setDescription('Membre à afficher').setRequired(true)
+          )
+      )
+      .addSubcommand((sub) =>
+        sub
+          .setName('setannonce')
+          .setDescription("Définir le salon d'annonces simples des invitations")
+          .addChannelOption((opt) =>
+            opt.setName('salon').setDescription("Salon d'annonces").setRequired(true)
+          )
+      )
+      .addSubcommand((sub) =>
+        sub
+          .setName('clearannonce')
+          .setDescription("Retirer le salon d'annonces simples des invitations")
+      )
+      .addSubcommand((sub) =>
+        sub
           .setName('setlog')
           .setDescription('Définir le salon de logs invitations')
           .addChannelOption((opt) =>
@@ -112,21 +133,22 @@ function createInvitationsService({ pool }) {
 
   async function getSettings(guildId) {
     const res = await pool.query(
-      `SELECT guild_id, log_channel_id, fake_min_account_days FROM invite_settings WHERE guild_id=$1`,
+      `SELECT guild_id, log_channel_id, announce_channel_id, fake_min_account_days FROM invite_settings WHERE guild_id=$1`,
       [guildId]
     );
-    return res.rows[0] || { guild_id: guildId, log_channel_id: null, fake_min_account_days: 7 };
+    return res.rows[0] || { guild_id: guildId, log_channel_id: null, announce_channel_id: null, fake_min_account_days: 7 };
   }
 
   async function setSettings(guildId, patch) {
     await pool.query(
-      `INSERT INTO invite_settings (guild_id, log_channel_id, fake_min_account_days)
-       VALUES ($1, $2, COALESCE($3, 7))
+      `INSERT INTO invite_settings (guild_id, log_channel_id, announce_channel_id, fake_min_account_days)
+       VALUES ($1, $2, $3, COALESCE($4, 7))
        ON CONFLICT (guild_id) DO UPDATE SET
          log_channel_id = COALESCE($2, invite_settings.log_channel_id),
-         fake_min_account_days = COALESCE($3, invite_settings.fake_min_account_days),
+         announce_channel_id = COALESCE($3, invite_settings.announce_channel_id),
+         fake_min_account_days = COALESCE($4, invite_settings.fake_min_account_days),
          updated_at = NOW()`,
-      [guildId, patch.log_channel_id ?? null, patch.fake_min_account_days ?? null]
+      [guildId, patch.log_channel_id ?? null, patch.announce_channel_id ?? null, patch.fake_min_account_days ?? null]
     );
   }
 
@@ -136,6 +158,19 @@ function createInvitationsService({ pool }) {
        VALUES ($1, NULL)
        ON CONFLICT (guild_id) DO UPDATE SET
          log_channel_id = NULL,
+         updated_at = NOW()`,
+      [guildId]
+    );
+  }
+
+
+
+  async function clearAnnounceChannel(guildId) {
+    await pool.query(
+      `INSERT INTO invite_settings (guild_id, announce_channel_id)
+       VALUES ($1, NULL)
+       ON CONFLICT (guild_id) DO UPDATE SET
+         announce_channel_id = NULL,
          updated_at = NOW()`,
       [guildId]
     );
@@ -167,6 +202,21 @@ function createInvitationsService({ pool }) {
     const channel = await guild.channels.fetch(settings.log_channel_id).catch(() => null);
     if (!channel?.isTextBased()) return;
     await channel.send({ embeds: [embed] }).catch(() => {});
+  }
+
+
+
+  async function sendSimpleJoinAnnouncement(guild, settings, targetMember, inviterId, total) {
+    const channelId = settings?.announce_channel_id;
+    if (!channelId) return;
+    const channel = await guild.channels.fetch(channelId).catch(() => null);
+    if (!channel?.isTextBased()) return;
+
+    const content = inviterId
+      ? `📣 ${targetMember} a été invité(e) par <@${inviterId}> — compteur net actuel: **${total}**.`
+      : `📣 ${targetMember} a rejoint, mais l'inviteur est inconnu pour le moment.`;
+
+    await channel.send({ content }).catch(() => {});
   }
 
   async function fetchRewardRows(guildId) {
@@ -323,6 +373,7 @@ function createInvitationsService({ pool }) {
         )
         .setTimestamp();
       await logInviteEvent(guild, settings, embed);
+      await sendSimpleJoinAnnouncement(guild, settings, member, inviterId, Number(stat?.total || 0));
       return;
     }
 
@@ -332,6 +383,7 @@ function createInvitationsService({ pool }) {
       .setDescription(`${member} a rejoint, mais aucune invitation n'a pu être identifiée.`)
       .setTimestamp();
     await logInviteEvent(guild, settings, embed);
+    await sendSimpleJoinAnnouncement(guild, settings, member, null, 0);
   }
 
   async function handleGuildMemberRemove(member) {
@@ -397,7 +449,7 @@ function createInvitationsService({ pool }) {
 
     const guildId = interaction.guildId;
     const sub = interaction.options.getSubcommand(true);
-    const adminSubs = new Set(['setlog', 'clearlog', 'setfakemin', 'setreward', 'delreward', 'bonus', 'sync']);
+    const adminSubs = new Set(['setlog', 'clearlog', 'setannonce', 'clearannonce', 'setfakemin', 'setreward', 'delreward', 'bonus', 'sync']);
     if (adminSubs.has(sub) && !interaction.memberPermissions?.has(PermissionsBitField.Flags.ManageGuild)) {
       await interaction.reply({
         content: '❌ Permission refusée. Tu dois avoir **Gérer le serveur**.',
@@ -478,6 +530,38 @@ function createInvitationsService({ pool }) {
       return true;
     }
 
+    if (sub === 'annonce') {
+      const target = interaction.options.getUser('membre', true);
+      const joinRes = await pool.query(
+        `SELECT inviter_id
+         FROM invite_joins
+         WHERE guild_id=$1 AND user_id=$2
+         ORDER BY joined_at DESC
+         LIMIT 1`,
+        [guildId, target.id]
+      );
+
+      const inviterId = joinRes.rows[0]?.inviter_id || null;
+      if (!inviterId) {
+        await interaction.reply({
+          content: `📣 ${target} a rejoint, mais l'inviteur est inconnu pour le moment.`,
+        });
+        return true;
+      }
+
+      await ensureStatRow(guildId, inviterId);
+      const statRes = await pool.query(
+        `SELECT total FROM invite_stats WHERE guild_id=$1 AND user_id=$2`,
+        [guildId, inviterId]
+      );
+      const total = Number(statRes.rows[0]?.total || 0);
+
+      await interaction.reply({
+        content: `📣 ${target} a été invité(e) par <@${inviterId}> — compteur net actuel: **${total}**.`,
+      });
+      return true;
+    }
+
     if (sub === 'setlog') {
       const channel = interaction.options.getChannel('salon', true);
       await setSettings(guildId, { log_channel_id: channel.id });
@@ -490,6 +574,20 @@ function createInvitationsService({ pool }) {
       await interaction.reply({ content: '✅ Salon de logs invitations retiré.', flags: MessageFlags.Ephemeral });
       return true;
     }
+
+    if (sub === 'setannonce') {
+      const channel = interaction.options.getChannel('salon', true);
+      await setSettings(guildId, { announce_channel_id: channel.id });
+      await interaction.reply({ content: `✅ Salon d'annonces invitations défini sur ${channel}.`, flags: MessageFlags.Ephemeral });
+      return true;
+    }
+
+    if (sub === 'clearannonce') {
+      await clearAnnounceChannel(guildId);
+      await interaction.reply({ content: "✅ Salon d'annonces invitations retiré.", flags: MessageFlags.Ephemeral });
+      return true;
+    }
+
 
     if (sub === 'setfakemin') {
       const days = interaction.options.getInteger('jours', true);
