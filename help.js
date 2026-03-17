@@ -18,7 +18,7 @@ function safeCmdName(cmdJson) {
 
 function prettyPermsForCategory(catKey) {
   // Affichage simple (tu peux ajuster)
-  const staffCats = new Set(["tickets", "moderation", "automod", "updates", "sendmessage", "modrank", "absence"]);
+  const staffCats = new Set(["tickets", "moderation", "automod", "updates", "sendmessage", "modrank", "absence", "welcome"]);
   return staffCats.has(catKey) ? "🔒 Staff / Admin recommandé" : "✅ Accessible à tous";
 }
 
@@ -207,6 +207,15 @@ function createHelpService({ services }) {
       serviceKeys: ["updates"],
     },
     {
+      key: "welcome",
+      emoji: "👋",
+      label: "Bienvenue",
+      short: "Onboarding auto",
+      description: "Messages automatiques de bienvenue avec template et salon dédié.",
+      examples: ["/welcome set", "/welcome info", "/welcome test"],
+      serviceKeys: ["welcome"],
+    },
+    {
       key: "worl",
       emoji: "⚖️",
       label: "WorL",
@@ -249,7 +258,7 @@ function createHelpService({ services }) {
       short: "Liste complète",
       description: "Affiche une vue compacte de toutes les commandes détectées.",
       examples: ["/help"],
-      serviceKeys: ["vouches", "rankup", "modrank", "tickets", "giveaways", "moderation", "automod", "updates", "invitations", "absence", "worl", "sendMessage"],
+      serviceKeys: ["vouches", "rankup", "modrank", "tickets", "giveaways", "moderation", "automod", "updates", "welcome", "invitations", "absence", "worl", "sendMessage"],
     },
   ];
 
