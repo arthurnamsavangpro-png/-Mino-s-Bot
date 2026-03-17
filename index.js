@@ -22,6 +22,7 @@ const { createAutomodService } = require("./automod");
 const { createUpdatesService } = require("./updates");
 const { createAbsenceService } = require("./absence");
 const { createInvitationsService } = require("./invitations");
+const { createWelcomeService } = require("./welcome");
 
 // ✅ NOUVEAU : WorL
 const { createWorlService } = require("./worl");
@@ -401,6 +402,15 @@ async function initDb() {
     );
     CREATE INDEX IF NOT EXISTS idx_invite_rewards_guild_required ON invite_rewards (guild_id, required_invites);
 
+    /* --- welcome --- */
+    CREATE TABLE IF NOT EXISTS welcome_settings (
+      guild_id TEXT PRIMARY KEY,
+      channel_id TEXT,
+      message_template TEXT NOT NULL DEFAULT '',
+      enabled BOOLEAN NOT NULL DEFAULT FALSE,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+
     /* ✅ WorL */
     CREATE TABLE IF NOT EXISTS worl_polls (
       poll_id TEXT PRIMARY KEY,
@@ -453,6 +463,7 @@ const automod = createAutomodService({ pool, config });
 const updates = createUpdatesService({ pool, config });
 const absence = createAbsenceService({ pool, config });
 const invitations = createInvitationsService({ pool, config });
+const welcome = createWelcomeService({ pool, config });
 
 // ✅ NOUVEAU
 const worl = createWorlService({ pool, config });
@@ -470,6 +481,7 @@ const help = createHelpService({
     updates,
     absence,
     invitations,
+    welcome,
     worl,
     sendMessage,
   },
@@ -491,6 +503,7 @@ async function registerCommands() {
     ...updates.commands,
     ...absence.commands,
     ...invitations.commands,
+    ...welcome.commands,
     // ✅ WorL
     ...worl.commands,
   ].map((c) => c.toJSON());
@@ -626,6 +639,9 @@ client.on("interactionCreate", async (interaction) => {
     // Invitations
     if (await invitations.handleInteraction(interaction, client)) return;
 
+    // Bienvenue
+    if (await welcome.handleInteraction(interaction, client)) return;
+
     // ✅ WorL (boutons + /worl)
     if (await worl.handleInteraction(interaction, client)) return;
 
@@ -677,6 +693,7 @@ client.on("guildMemberAdd", async (member) => {
     await automod.handleGuildMemberAdd(member, client);
     await moderation.handleGuildMemberAdd?.(member, client);
     await invitations.handleGuildMemberAdd(member, client);
+    await welcome.handleGuildMemberAdd(member, client);
   } catch (e) {
     console.error("guildMemberAdd fatal:", e);
   }
