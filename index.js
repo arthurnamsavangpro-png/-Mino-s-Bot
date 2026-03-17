@@ -383,11 +383,13 @@ async function initDb() {
       inviter_id TEXT,
       invite_code TEXT,
       is_fake BOOLEAN NOT NULL DEFAULT FALSE,
+      is_ambiguous BOOLEAN NOT NULL DEFAULT FALSE,
       status TEXT NOT NULL DEFAULT 'joined',
       joined_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       left_at TIMESTAMPTZ,
       PRIMARY KEY (guild_id, user_id)
     );
+    ALTER TABLE invite_joins ADD COLUMN IF NOT EXISTS is_ambiguous BOOLEAN NOT NULL DEFAULT FALSE;
     CREATE INDEX IF NOT EXISTS idx_invite_joins_guild_inviter ON invite_joins (guild_id, inviter_id);
 
     CREATE TABLE IF NOT EXISTS invite_rewards (

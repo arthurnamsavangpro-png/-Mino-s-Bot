@@ -190,10 +190,15 @@ function createInvitationsService({ pool }) {
     if (!member) return;
 
     for (const r of rewards) {
+      const roleId = r.role_id;
       const canHave = total >= Number(r.required_invites);
-      if (!guild.roles.cache.has(r.role_id)) continue;
-      if (canHave && !member.roles.cache.has(r.role_id)) {
-        await member.roles.add(r.role_id, 'Récompense invitations').catch(() => {});
+      if (!guild.roles.cache.has(roleId)) continue;
+      const hasRole = member.roles.cache.has(roleId);
+      if (canHave && !hasRole) {
+        await member.roles.add(roleId, 'Récompense invitations').catch(() => {});
+      }
+      if (!canHave && hasRole) {
+        await member.roles.remove(roleId, 'Seuil invitations non atteint').catch(() => {});
       }
     }
   }
@@ -209,21 +214,32 @@ function createInvitationsService({ pool }) {
   async function resolveJoinInvite(guild) {
     const previous = inviteCache.get(guild.id) || new Map();
     const current = await guild.invites.fetch().catch(() => null);
-    if (!current) return { invite: null, currentMap: previous };
+    if (!current) return { invite: null, currentMap: previous, isAmbiguous: true };
 
-    let used = null;
+    const candidates = [];
     for (const inv of current.values()) {
       const before = previous.get(inv.code) || 0;
       const now = inv.uses || 0;
       if (now > before) {
-        used = inv;
-        break;
+        candidates.push({ inv, delta: now - before });
       }
+    }
+
+    let used = null;
+    let isAmbiguous = false;
+    if (candidates.length === 1 && candidates[0].delta === 1) {
+      used = candidates[0].inv;
+    } else if (candidates.length > 0) {
+      isAmbiguous = true;
+      const exact = candidates.find((c) => c.delta === 1);
+      used = exact?.inv || null;
+    } else {
+      isAmbiguous = true;
     }
 
     const nextMap = new Map();
     for (const inv of current.values()) nextMap.set(inv.code, inv.uses || 0);
-    return { invite: used, currentMap: nextMap };
+    return { invite: used, currentMap: nextMap, isAmbiguous };
   }
 
   async function getRank(guildId, userId) {
@@ -245,49 +261,64 @@ function createInvitationsService({ pool }) {
 
     const guild = member.guild;
     const settings = await getSettings(guild.id);
-    const { invite, currentMap } = await resolveJoinInvite(guild);
+    const { invite, currentMap, isAmbiguous } = await resolveJoinInvite(guild);
     inviteCache.set(guild.id, currentMap);
 
-    const inviterId = invite?.inviter?.id || null;
+    let inviterId = invite?.inviter?.id || null;
+    if (inviterId === member.id) inviterId = null;
+
     const accountAgeMs = Date.now() - member.user.createdTimestamp;
     const minDays = Number(settings.fake_min_account_days || 7);
     const isFake = accountAgeMs < minDays * 24 * 60 * 60 * 1000;
 
-    await pool.query(
-      `INSERT INTO invite_joins (guild_id, user_id, inviter_id, invite_code, is_fake)
-       VALUES ($1, $2, $3, $4, $5)
-       ON CONFLICT (guild_id, user_id)
-       DO UPDATE SET
-         inviter_id=EXCLUDED.inviter_id,
-         invite_code=EXCLUDED.invite_code,
-         is_fake=EXCLUDED.is_fake,
-         joined_at=NOW(),
-         left_at=NULL,
-         status='joined'`,
-      [guild.id, member.id, inviterId, invite?.code || null, isFake]
-    );
+    let stat = null;
+    await pool.query('BEGIN');
+    try {
+      await pool.query(
+        `INSERT INTO invite_joins (guild_id, user_id, inviter_id, invite_code, is_fake, is_ambiguous)
+         VALUES ($1, $2, $3, $4, $5, $6)
+         ON CONFLICT (guild_id, user_id)
+         DO UPDATE SET
+           inviter_id=EXCLUDED.inviter_id,
+           invite_code=EXCLUDED.invite_code,
+           is_fake=EXCLUDED.is_fake,
+           is_ambiguous=EXCLUDED.is_ambiguous,
+           joined_at=NOW(),
+           left_at=NULL,
+           status='joined'`,
+        [guild.id, member.id, inviterId, invite?.code || null, isFake, isAmbiguous]
+      );
+
+      if (inviterId) {
+        await ensureStatRow(guild.id, inviterId);
+        await pool.query(
+          `UPDATE invite_stats
+           SET regular = regular + CASE WHEN $3 THEN 0 ELSE 1 END,
+               fake = fake + CASE WHEN $3 THEN 1 ELSE 0 END,
+               updated_at = NOW()
+           WHERE guild_id=$1 AND user_id=$2`,
+          [guild.id, inviterId, isFake]
+        );
+        stat = await recomputeTotal(guild.id, inviterId);
+      }
+      await pool.query('COMMIT');
+    } catch (e) {
+      await pool.query('ROLLBACK').catch(() => {});
+      throw e;
+    }
 
     if (inviterId) {
-      await ensureStatRow(guild.id, inviterId);
-      await pool.query(
-        `UPDATE invite_stats
-         SET regular = regular + CASE WHEN $3 THEN 0 ELSE 1 END,
-             fake = fake + CASE WHEN $3 THEN 1 ELSE 0 END,
-             updated_at = NOW()
-         WHERE guild_id=$1 AND user_id=$2`,
-        [guild.id, inviterId, isFake]
-      );
-      const stat = await recomputeTotal(guild.id, inviterId);
       await syncRewardsForMember(guild, inviterId);
 
       const embed = new EmbedBuilder()
         .setColor(isFake ? 0xe67e22 : 0x2ecc71)
-        .setTitle('📥 Nouvelle invitation détectée')
+        .setTitle(isAmbiguous ? '📥 Nouvelle invitation détectée (ambiguë)' : '📥 Nouvelle invitation détectée')
         .setDescription(
           `${member} a rejoint via ${invite ? `\`${invite.code}\`` : '`inconnue`'}\nInviteur: <@${inviterId}>`
         )
         .addFields(
           { name: 'Type', value: isFake ? '⚠️ Suspecte (compte trop récent)' : '✅ Valide', inline: true },
+          { name: 'Attribution', value: isAmbiguous ? '⚠️ Ambiguë (concurrence possible)' : '✅ Fiable', inline: true },
           { name: 'Total net', value: `**${stat?.total || 0}**`, inline: true }
         )
         .setTimestamp();
@@ -308,33 +339,45 @@ function createInvitationsService({ pool }) {
     const guild = member.guild;
     const settings = await getSettings(guild.id);
 
-    const res = await pool.query(
-      `SELECT inviter_id
-       FROM invite_joins
-       WHERE guild_id=$1 AND user_id=$2 AND status='joined'
-       LIMIT 1`,
-      [guild.id, member.id]
-    );
-    const inviterId = res.rows[0]?.inviter_id || null;
+    let inviterId = null;
+    let stat = null;
+    await pool.query('BEGIN');
+    try {
+      const res = await pool.query(
+        `SELECT inviter_id
+         FROM invite_joins
+         WHERE guild_id=$1 AND user_id=$2 AND status='joined'
+         LIMIT 1`,
+        [guild.id, member.id]
+      );
+      inviterId = res.rows[0]?.inviter_id || null;
 
-    await pool.query(
-      `UPDATE invite_joins
-       SET status='left', left_at=NOW()
-       WHERE guild_id=$1 AND user_id=$2 AND status='joined'`,
-      [guild.id, member.id]
-    );
+      await pool.query(
+        `UPDATE invite_joins
+         SET status='left', left_at=NOW()
+         WHERE guild_id=$1 AND user_id=$2 AND status='joined'`,
+        [guild.id, member.id]
+      );
+
+      if (inviterId) {
+        await ensureStatRow(guild.id, inviterId);
+        await pool.query(
+          `UPDATE invite_stats
+           SET left_count = left_count + 1,
+               updated_at = NOW()
+           WHERE guild_id=$1 AND user_id=$2`,
+          [guild.id, inviterId]
+        );
+        stat = await recomputeTotal(guild.id, inviterId);
+      }
+      await pool.query('COMMIT');
+    } catch (e) {
+      await pool.query('ROLLBACK').catch(() => {});
+      throw e;
+    }
 
     if (!inviterId) return;
-
-    await ensureStatRow(guild.id, inviterId);
-    await pool.query(
-      `UPDATE invite_stats
-       SET left_count = left_count + 1,
-           updated_at = NOW()
-       WHERE guild_id=$1 AND user_id=$2`,
-      [guild.id, inviterId]
-    );
-    const stat = await recomputeTotal(guild.id, inviterId);
+    await syncRewardsForMember(guild, inviterId);
 
     const embed = new EmbedBuilder()
       .setColor(0xe74c3c)
