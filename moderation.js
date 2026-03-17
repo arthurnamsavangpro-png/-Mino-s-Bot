@@ -1266,13 +1266,14 @@ function createModerationService({ pool, config }) {
 
           try {
             const fetched = await message.channel.messages.fetch({ limit: 100 });
-            let toDelete = fetched.filter((m) => m.id !== message.id);
+            let toDelete = fetched;
 
             if (targetUser) {
-              toDelete = toDelete.filter((m) => m.author?.id === targetUser.id);
+              toDelete = toDelete.filter((m) => m.author?.id === targetUser.id || m.id === message.id);
             }
 
-            const arr = [...toDelete.values()].slice(0, amountRaw);
+            // +1 to also remove the command message itself
+            const arr = [...toDelete.values()].slice(0, Math.min(100, amountRaw + 1));
             if (!arr.length) {
               await message.reply('⚠️ Aucun message correspondant à supprimer.');
               return true;
@@ -1298,12 +1299,14 @@ function createModerationService({ pool, config }) {
                 requested: amountRaw,
                 deleted: deletedCount,
                 include_bots: true,
+                includes_command_message: true,
               },
               logChannelId: settings.modlog_channel_id || null,
               logMessageId: null,
             });
 
-            await message.reply(`✅ Purge terminée. ${deletedCount} message(s) supprimé(s).`);
+            const ack = await message.channel.send(`✅ Purge terminée. ${deletedCount} message(s) supprimé(s).`);
+            setTimeout(() => ack.delete().catch(() => {}), 4000);
             return true;
           } catch (e) {
             console.error('prefix +purge error:', e);
