@@ -1244,6 +1244,74 @@ function createModerationService({ pool, config }) {
           }
         }
 
+        if (plusCmd === 'purge') {
+          const settings = await getSettings(message.guild.id);
+          const canPurge =
+            message.member.permissions.has(PermissionsBitField.Flags.ManageMessages) ||
+            message.member.permissions.has(PermissionsBitField.Flags.Administrator) ||
+            hasRole(message.member, settings.staff_role_id);
+
+          if (!canPurge) {
+            await message.reply('⛔ Il faut la permission **Gérer les messages** (ou être staff) pour faire ça.');
+            return true;
+          }
+
+          const amountRaw = Number.parseInt(plusParts[0] || '', 10);
+          const targetUser = message.mentions.users.first() || null;
+
+          if (!Number.isInteger(amountRaw) || amountRaw < 1 || amountRaw > 100) {
+            await message.reply('⚠️ Utilisation: `+purge <1-100> [@membre]`');
+            return true;
+          }
+
+          try {
+            const fetched = await message.channel.messages.fetch({ limit: 100 });
+            let toDelete = fetched.filter((m) => m.id !== message.id);
+
+            if (targetUser) {
+              toDelete = toDelete.filter((m) => m.author?.id === targetUser.id);
+            }
+
+            const arr = [...toDelete.values()].slice(0, amountRaw);
+            if (!arr.length) {
+              await message.reply('⚠️ Aucun message correspondant à supprimer.');
+              return true;
+            }
+
+            const deleted = await message.channel.bulkDelete(arr, true);
+            const deletedCount = deleted?.size ?? 0;
+
+            const moderatorTag = fmtUserTag(message.author, message.author.tag);
+
+            await insertCase({
+              guildId: message.guild.id,
+              action: 'PURGE',
+              targetId: targetUser?.id || null,
+              targetTag: targetUser?.tag || null,
+              moderatorId: message.author.id,
+              moderatorTag,
+              reason: 'Purge via +purge',
+              durationMs: null,
+              metadata: {
+                source: 'prefix:+purge',
+                channel_id: message.channel.id,
+                requested: amountRaw,
+                deleted: deletedCount,
+                include_bots: true,
+              },
+              logChannelId: settings.modlog_channel_id || null,
+              logMessageId: null,
+            });
+
+            await message.reply(`✅ Purge terminée. ${deletedCount} message(s) supprimé(s).`);
+            return true;
+          } catch (e) {
+            console.error('prefix +purge error:', e);
+            await message.reply('⚠️ Impossible de purge (permissions/erreur API).');
+            return true;
+          }
+        }
+
         return false;
       }
 
