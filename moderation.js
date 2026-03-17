@@ -122,6 +122,68 @@ function hasAnyPermission(interaction, perms) {
   return interaction.memberPermissions.has(perms);
 }
 
+async function resolveGuildMemberByInput(guild, rawInput) {
+  const input = String(rawInput || '').trim();
+  if (!guild || !input) return null;
+
+  const mentionOrId = input.replace(/[<@!>]/g, '').trim();
+  if (/^\d{15,21}$/.test(mentionOrId)) {
+    const byId = await guild.members.fetch(mentionOrId).catch(() => null);
+    if (byId) return byId;
+  }
+
+  const lowered = input.toLowerCase();
+  const members = await guild.members.fetch().catch(() => null);
+  if (!members) return null;
+
+  const exact = members.find((m) => {
+    const display = (m.displayName || '').toLowerCase();
+    const username = (m.user?.username || '').toLowerCase();
+    const tag = (m.user?.tag || '').toLowerCase();
+    return display === lowered || username === lowered || tag === lowered;
+  });
+  if (exact) return exact;
+
+  return (
+    members.find((m) => {
+      const display = (m.displayName || '').toLowerCase();
+      const username = (m.user?.username || '').toLowerCase();
+      const tag = (m.user?.tag || '').toLowerCase();
+      return display.includes(lowered) || username.includes(lowered) || tag.includes(lowered);
+    }) || null
+  );
+}
+
+async function resolveBanByInput(guild, rawInput) {
+  const input = String(rawInput || '').trim();
+  if (!guild || !input) return null;
+
+  const mentionOrId = input.replace(/[<@!>]/g, '').trim();
+  const bans = await guild.bans.fetch().catch(() => null);
+  if (!bans) return null;
+
+  if (/^\d{15,21}$/.test(mentionOrId)) {
+    const byId = bans.get(mentionOrId);
+    if (byId) return byId;
+  }
+
+  const lowered = input.toLowerCase();
+  const exact = bans.find((b) => {
+    const username = (b.user?.username || '').toLowerCase();
+    const tag = (b.user?.tag || '').toLowerCase();
+    return username === lowered || tag === lowered;
+  });
+  if (exact) return exact;
+
+  return (
+    bans.find((b) => {
+      const username = (b.user?.username || '').toLowerCase();
+      const tag = (b.user?.tag || '').toLowerCase();
+      return username.includes(lowered) || tag.includes(lowered);
+    }) || null
+  );
+}
+
 async function tryDmUser(user, embedOrContent) {
   try {
     if (!user) return false;
@@ -1178,20 +1240,21 @@ function createModerationService({ pool, config }) {
             return true;
           }
 
-          const targetUser = message.mentions.users.first();
-          if (!targetUser) {
-            await message.reply('⚠️ Utilisation: `+ban @membre [raison]`');
+          const targetRaw = plusParts[0] || '';
+          const targetFromMention = message.mentions.users.first() || null;
+          const targetMember = targetFromMention
+            ? await message.guild.members.fetch(targetFromMention.id).catch(() => null)
+            : await resolveGuildMemberByInput(message.guild, targetRaw);
+
+          if (!targetMember) {
+            await message.reply('⚠️ Utilisation: `+ban <@membre|id|nom> [raison]`');
             return true;
           }
+
+          const targetUser = targetMember.user;
 
           if (targetUser.id === message.author.id) {
             await message.reply('⚠️ Tu ne peux pas te bannir toi-même.');
-            return true;
-          }
-
-          const targetMember = await message.guild.members.fetch(targetUser.id).catch(() => null);
-          if (!targetMember) {
-            await message.reply('⚠️ Membre introuvable.');
             return true;
           }
 
@@ -1208,10 +1271,7 @@ function createModerationService({ pool, config }) {
             }
           }
 
-          const reason = plusParts
-            .filter((p) => !/^<@!?\d+>$/.test(p))
-            .join(' ')
-            .trim() || 'Aucune raison fournie';
+          const reason = plusParts.slice(1).join(' ').trim() || 'Aucune raison fournie';
           const moderatorTag = fmtUserTag(message.author, message.author.tag);
           const banReason = safeReason(reason, moderatorTag);
 
@@ -1240,6 +1300,63 @@ function createModerationService({ pool, config }) {
           } catch (e) {
             console.error('prefix +ban error:', e);
             await message.reply('⚠️ Impossible de bannir (permissions/hiérarchie/erreur API).');
+            return true;
+          }
+        }
+
+        if (plusCmd === 'unban') {
+          const canUnban =
+            message.member.permissions.has(PermissionsBitField.Flags.BanMembers) ||
+            message.member.permissions.has(PermissionsBitField.Flags.Administrator);
+          if (!canUnban) {
+            await message.reply('⛔ Il faut la permission **Bannir des membres** pour faire ça.');
+            return true;
+          }
+
+          const targetRaw = plusParts[0] || '';
+          if (!targetRaw) {
+            await message.reply('⚠️ Utilisation: `+unban <id|nom|tag> [raison]`');
+            return true;
+          }
+
+          const ban = await resolveBanByInput(message.guild, targetRaw);
+          if (!ban) {
+            await message.reply('⚠️ Aucun utilisateur banni trouvé avec cette recherche.');
+            return true;
+          }
+
+          const userId = ban.user?.id;
+          if (!userId) {
+            await message.reply('⚠️ Impossible de déterminer l’utilisateur à débannir.');
+            return true;
+          }
+
+          const reason = plusParts.slice(1).join(' ').trim() || 'Déban via +unban';
+          const moderatorTag = fmtUserTag(message.author, message.author.tag);
+          const apiReason = safeReason(reason, moderatorTag);
+
+          try {
+            await message.guild.members.unban(userId, apiReason);
+
+            const caseId = await insertCase({
+              guildId: message.guild.id,
+              action: 'UNBAN',
+              targetId: userId,
+              targetTag: ban.user?.tag || null,
+              moderatorId: message.author.id,
+              moderatorTag,
+              reason,
+              durationMs: null,
+              metadata: { source: 'prefix:+unban', query: targetRaw },
+              logChannelId: null,
+              logMessageId: null,
+            });
+
+            await message.reply(`✅ Déban effectué sur **${fmtUserTag(ban.user, ban.user?.tag)}**. Case **#${caseId}**.`);
+            return true;
+          } catch (e) {
+            console.error('prefix +unban error:', e);
+            await message.reply('⚠️ Impossible de débannir (permissions/erreur API).');
             return true;
           }
         }
