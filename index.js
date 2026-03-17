@@ -551,6 +551,9 @@ client.on("interactionCreate", async (interaction) => {
     // ✅ WorL (boutons + /worl)
     if (await worl.handleInteraction(interaction, client)) return;
 
+    // Moderation (slash + composants /autorole)
+    if (await moderation.handleInteraction(interaction, client)) return;
+
     // Le reste: slash uniquement
     if (!interaction.isChatInputCommand()) return;
 
@@ -563,7 +566,6 @@ client.on("interactionCreate", async (interaction) => {
     if (await vouches.handleInteraction(interaction, client)) return;
     if (await rankup.handleInteraction(interaction)) return;
     if (await modrank.handleInteraction(interaction, client)) return;
-    if (await moderation.handleInteraction(interaction, client)) return;
   } catch (e) {
     console.error("interactionCreate fatal:", e);
     if (interaction?.isRepliable?.()) {
