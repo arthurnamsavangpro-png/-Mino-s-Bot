@@ -21,6 +21,7 @@ const { createAutomodService } = require("./automod");
 // ✅ updates/broadcast
 const { createUpdatesService } = require("./updates");
 const { createAbsenceService } = require("./absence");
+const { createInvitationsService } = require("./invitations");
 
 // ✅ NOUVEAU : WorL
 const { createWorlService } = require("./worl");
@@ -356,6 +357,49 @@ async function initDb() {
     CREATE INDEX IF NOT EXISTS idx_staff_absences_guild_user_status ON staff_absences (guild_id, user_id, status);
     CREATE INDEX IF NOT EXISTS idx_staff_absences_guild_status_end ON staff_absences (guild_id, status, end_at);
 
+    /* --- invitations --- */
+    CREATE TABLE IF NOT EXISTS invite_settings (
+      guild_id TEXT PRIMARY KEY,
+      log_channel_id TEXT,
+      fake_min_account_days INTEGER NOT NULL DEFAULT 7,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+
+    CREATE TABLE IF NOT EXISTS invite_stats (
+      guild_id TEXT NOT NULL,
+      user_id TEXT NOT NULL,
+      regular INTEGER NOT NULL DEFAULT 0,
+      fake INTEGER NOT NULL DEFAULT 0,
+      left_count INTEGER NOT NULL DEFAULT 0,
+      bonus INTEGER NOT NULL DEFAULT 0,
+      total INTEGER NOT NULL DEFAULT 0,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      PRIMARY KEY (guild_id, user_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_invite_stats_guild_total ON invite_stats (guild_id, total DESC);
+
+    CREATE TABLE IF NOT EXISTS invite_joins (
+      guild_id TEXT NOT NULL,
+      user_id TEXT NOT NULL,
+      inviter_id TEXT,
+      invite_code TEXT,
+      is_fake BOOLEAN NOT NULL DEFAULT FALSE,
+      status TEXT NOT NULL DEFAULT 'joined',
+      joined_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      left_at TIMESTAMPTZ,
+      PRIMARY KEY (guild_id, user_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_invite_joins_guild_inviter ON invite_joins (guild_id, inviter_id);
+
+    CREATE TABLE IF NOT EXISTS invite_rewards (
+      guild_id TEXT NOT NULL,
+      role_id TEXT NOT NULL,
+      required_invites INTEGER NOT NULL,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      PRIMARY KEY (guild_id, role_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_invite_rewards_guild_required ON invite_rewards (guild_id, required_invites);
+
     /* ✅ WorL */
     CREATE TABLE IF NOT EXISTS worl_polls (
       poll_id TEXT PRIMARY KEY,
@@ -407,6 +451,7 @@ const moderation = createModerationService({ pool, config });
 const automod = createAutomodService({ pool, config });
 const updates = createUpdatesService({ pool, config });
 const absence = createAbsenceService({ pool, config });
+const invitations = createInvitationsService({ pool, config });
 
 // ✅ NOUVEAU
 const worl = createWorlService({ pool, config });
@@ -423,6 +468,7 @@ const help = createHelpService({
     automod,
     updates,
     absence,
+    invitations,
     worl,
     sendMessage,
   },
@@ -443,6 +489,7 @@ async function registerCommands() {
     ...automod.commands,
     ...updates.commands,
     ...absence.commands,
+    ...invitations.commands,
     // ✅ WorL
     ...worl.commands,
   ].map((c) => c.toJSON());
@@ -452,6 +499,7 @@ async function registerCommands() {
   if (COMMANDS_SCOPE === "global") {
     await rest.put(Routes.applicationCommands(CLIENT_ID), { body: commands });
     console.log("✅ Slash commands enregistrées en GLOBAL (multi-serveur).");
+    console.log("ℹ️ Les commandes globales peuvent prendre quelques minutes à apparaître sur Discord.");
     return;
   }
 
@@ -475,7 +523,7 @@ async function registerCommands() {
 }
 
 /* ----------------------------- Ready ------------------------------ */
-client.once("ready", async () => {
+client.once("clientReady", async () => {
   console.log(`✅ Connecté en tant que ${client.user.tag}`);
 
   // ✅ Rotation des activités (status)
@@ -505,6 +553,7 @@ client.once("ready", async () => {
   try {
     await initDb();
     await registerCommands();
+    await invitations.primeCache(client);
 
     // vouchboard init + refresh
     for (const g of client.guilds.cache.values()) {
@@ -547,6 +596,9 @@ client.on("interactionCreate", async (interaction) => {
 
     // Absence
     if (await absence.handleInteraction(interaction, client)) return;
+
+    // Invitations
+    if (await invitations.handleInteraction(interaction, client)) return;
 
     // ✅ WorL (boutons + /worl)
     if (await worl.handleInteraction(interaction, client)) return;
@@ -598,6 +650,7 @@ client.on("guildMemberAdd", async (member) => {
   try {
     await automod.handleGuildMemberAdd(member, client);
     await moderation.handleGuildMemberAdd?.(member, client);
+    await invitations.handleGuildMemberAdd(member, client);
   } catch (e) {
     console.error("guildMemberAdd fatal:", e);
   }
@@ -624,6 +677,30 @@ client.on("webhooksUpdate", async (channel) => {
     await automod.handleWebhooksUpdate(channel, client);
   } catch (e) {
     console.error("webhooksUpdate fatal:", e);
+  }
+});
+
+client.on("guildMemberRemove", async (member) => {
+  try {
+    await invitations.handleGuildMemberRemove(member, client);
+  } catch (e) {
+    console.error("guildMemberRemove fatal:", e);
+  }
+});
+
+client.on("inviteCreate", async (invite) => {
+  try {
+    await invitations.handleInviteCreate(invite, client);
+  } catch (e) {
+    console.error("inviteCreate fatal:", e);
+  }
+});
+
+client.on("inviteDelete", async (invite) => {
+  try {
+    await invitations.handleInviteDelete(invite, client);
+  } catch (e) {
+    console.error("inviteDelete fatal:", e);
   }
 });
 
