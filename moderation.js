@@ -3,6 +3,7 @@ const {
   EmbedBuilder,
   PermissionsBitField,
   ChannelType,
+  MessageFlags,
   ActionRowBuilder,
   RoleSelectMenuBuilder,
   StringSelectMenuBuilder,
@@ -2019,28 +2020,29 @@ function createModerationService({ pool, config }) {
 
   async function handleAutoroleComponent(interaction, client) {
     try {
-      const settings = await getSettings(interaction.guildId);
-
-      if (!mustHave(interaction, PermissionsBitField.Flags.ManageRoles, settings.staff_role_id)) {
-        await interaction.reply({
-          content: '⛔ Il faut la permission **Gérer les rôles** (ou être staff) pour faire ça.',
-          ephemeral: true,
-        });
-        return true;
-      }
-
-      const guild = interaction.guild;
-      if (!guild) {
-        await interaction.reply({ content: '⚠️ Serveur introuvable.', ephemeral: true });
-        return true;
-      }
-
       if (
         interaction.customId === 'autorole:add' ||
         interaction.customId === 'autorole:remove' ||
         interaction.customId === 'autorole:clear'
       ) {
         await interaction.deferUpdate();
+      }
+
+      const settings = await getSettings(interaction.guildId);
+
+      if (!mustHave(interaction, PermissionsBitField.Flags.ManageRoles, settings.staff_role_id)) {
+        await interaction.editReply({
+          content: '⛔ Il faut la permission **Gérer les rôles** (ou être staff) pour faire ça.',
+          components: [],
+          embeds: [],
+        });
+        return true;
+      }
+
+      const guild = interaction.guild;
+      if (!guild) {
+        await interaction.editReply({ content: '⚠️ Serveur introuvable.', components: [], embeds: [] });
+        return true;
       }
 
       const auto = await getAutoroleSettings(interaction.guildId);
@@ -2085,7 +2087,7 @@ function createModerationService({ pool, config }) {
       if (!interaction.deferred && !interaction.replied) {
         await interaction.reply({
           content: '⚠️ Erreur pendant la mise à jour du panneau auto-rôles.',
-          ephemeral: true,
+          flags: MessageFlags.Ephemeral,
         }).catch(() => {});
       } else {
         await interaction.editReply({
