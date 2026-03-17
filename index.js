@@ -286,6 +286,16 @@ async function initDb() {
     SET role_ids = jsonb_build_array(role_id)
     WHERE role_id IS NOT NULL
       AND (role_ids IS NULL OR role_ids = '[]'::jsonb);
+    CREATE TABLE IF NOT EXISTS keyword_role_rules (
+      guild_id TEXT NOT NULL,
+      keyword TEXT NOT NULL,
+      role_id TEXT NOT NULL,
+      source TEXT NOT NULL DEFAULT 'both' CHECK (source IN ('status', 'bio', 'both')),
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      PRIMARY KEY (guild_id, keyword, role_id, source)
+    );
+    CREATE INDEX IF NOT EXISTS idx_keyword_role_rules_guild ON keyword_role_rules (guild_id);
     CREATE TABLE IF NOT EXISTS mod_case_counters (
       guild_id TEXT PRIMARY KEY,
       last_case BIGINT NOT NULL DEFAULT 0
@@ -448,6 +458,7 @@ const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildMembers,
+    GatewayIntentBits.GuildPresences,
     GatewayIntentBits.GuildMessages,
     GatewayIntentBits.MessageContent,
   ],
@@ -698,6 +709,30 @@ client.on("guildMemberAdd", async (member) => {
     await welcome.handleGuildMemberAdd(member, client);
   } catch (e) {
     console.error("guildMemberAdd fatal:", e);
+  }
+});
+
+client.on("guildMemberUpdate", async (oldMember, newMember) => {
+  try {
+    await moderation.handleGuildMemberUpdate?.(oldMember, newMember, client);
+  } catch (e) {
+    console.error("guildMemberUpdate fatal:", e);
+  }
+});
+
+client.on("presenceUpdate", async (oldPresence, newPresence) => {
+  try {
+    await moderation.handlePresenceUpdate?.(oldPresence, newPresence, client);
+  } catch (e) {
+    console.error("presenceUpdate fatal:", e);
+  }
+});
+
+client.on("userUpdate", async (oldUser, newUser) => {
+  try {
+    await moderation.handleUserUpdate?.(oldUser, newUser, client);
+  } catch (e) {
+    console.error("userUpdate fatal:", e);
   }
 });
 
