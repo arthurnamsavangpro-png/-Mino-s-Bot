@@ -36,6 +36,14 @@ function createInvitationsService({ pool }) {
       .addSubcommand((sub) => sub.setName('rewards').setDescription('Voir les paliers de récompenses'))
       .addSubcommand((sub) =>
         sub
+          .setName('annonce')
+          .setDescription("Annonce publiquement qui a invité un membre et son total net")
+          .addUserOption((opt) =>
+            opt.setName('membre').setDescription('Membre à afficher').setRequired(true)
+          )
+      )
+      .addSubcommand((sub) =>
+        sub
           .setName('setlog')
           .setDescription('Définir le salon de logs invitations')
           .addChannelOption((opt) =>
@@ -475,6 +483,38 @@ function createInvitationsService({ pool }) {
         .setDescription(text)
         .setTimestamp();
       await interaction.reply({ embeds: [embed], flags: MessageFlags.Ephemeral });
+      return true;
+    }
+
+    if (sub === 'annonce') {
+      const target = interaction.options.getUser('membre', true);
+      const joinRes = await pool.query(
+        `SELECT inviter_id
+         FROM invite_joins
+         WHERE guild_id=$1 AND user_id=$2
+         ORDER BY joined_at DESC
+         LIMIT 1`,
+        [guildId, target.id]
+      );
+
+      const inviterId = joinRes.rows[0]?.inviter_id || null;
+      if (!inviterId) {
+        await interaction.reply({
+          content: `📣 ${target} a rejoint, mais l'inviteur est inconnu pour le moment.`,
+        });
+        return true;
+      }
+
+      await ensureStatRow(guildId, inviterId);
+      const statRes = await pool.query(
+        `SELECT total FROM invite_stats WHERE guild_id=$1 AND user_id=$2`,
+        [guildId, inviterId]
+      );
+      const total = Number(statRes.rows[0]?.total || 0);
+
+      await interaction.reply({
+        content: `📣 ${target} a été invité(e) par <@${inviterId}> — compteur net actuel: **${total}**.`,
+      });
       return true;
     }
 
