@@ -21,6 +21,7 @@ const { createAutomodService } = require("./automod");
 // ✅ updates/broadcast
 const { createUpdatesService } = require("./updates");
 const { createAbsenceService } = require("./absence");
+const { createInvitationsService } = require("./invitations");
 
 // ✅ NOUVEAU : WorL
 const { createWorlService } = require("./worl");
@@ -114,6 +115,9 @@ const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: process.env.NODE_ENV === "production" ? { rejectUnauthorized: false } : false,
 });
+const DB_RETRY_MS = Number(process.env.DB_RETRY_MS || 30000);
+let dbBootstrapped = false;
+
 
 async function initDb() {
   await pool.query(`
@@ -356,6 +360,49 @@ async function initDb() {
     CREATE INDEX IF NOT EXISTS idx_staff_absences_guild_user_status ON staff_absences (guild_id, user_id, status);
     CREATE INDEX IF NOT EXISTS idx_staff_absences_guild_status_end ON staff_absences (guild_id, status, end_at);
 
+    /* --- invitations --- */
+    CREATE TABLE IF NOT EXISTS invite_settings (
+      guild_id TEXT PRIMARY KEY,
+      log_channel_id TEXT,
+      fake_min_account_days INTEGER NOT NULL DEFAULT 7,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+
+    CREATE TABLE IF NOT EXISTS invite_stats (
+      guild_id TEXT NOT NULL,
+      user_id TEXT NOT NULL,
+      regular INTEGER NOT NULL DEFAULT 0,
+      fake INTEGER NOT NULL DEFAULT 0,
+      left_count INTEGER NOT NULL DEFAULT 0,
+      bonus INTEGER NOT NULL DEFAULT 0,
+      total INTEGER NOT NULL DEFAULT 0,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      PRIMARY KEY (guild_id, user_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_invite_stats_guild_total ON invite_stats (guild_id, total DESC);
+
+    CREATE TABLE IF NOT EXISTS invite_joins (
+      guild_id TEXT NOT NULL,
+      user_id TEXT NOT NULL,
+      inviter_id TEXT,
+      invite_code TEXT,
+      is_fake BOOLEAN NOT NULL DEFAULT FALSE,
+      status TEXT NOT NULL DEFAULT 'joined',
+      joined_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      left_at TIMESTAMPTZ,
+      PRIMARY KEY (guild_id, user_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_invite_joins_guild_inviter ON invite_joins (guild_id, inviter_id);
+
+    CREATE TABLE IF NOT EXISTS invite_rewards (
+      guild_id TEXT NOT NULL,
+      role_id TEXT NOT NULL,
+      required_invites INTEGER NOT NULL,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      PRIMARY KEY (guild_id, role_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_invite_rewards_guild_required ON invite_rewards (guild_id, required_invites);
+
     /* ✅ WorL */
     CREATE TABLE IF NOT EXISTS worl_polls (
       poll_id TEXT PRIMARY KEY,
@@ -407,6 +454,7 @@ const moderation = createModerationService({ pool, config });
 const automod = createAutomodService({ pool, config });
 const updates = createUpdatesService({ pool, config });
 const absence = createAbsenceService({ pool, config });
+const invitations = createInvitationsService({ pool, config });
 
 // ✅ NOUVEAU
 const worl = createWorlService({ pool, config });
@@ -423,6 +471,7 @@ const help = createHelpService({
     automod,
     updates,
     absence,
+    invitations,
     worl,
     sendMessage,
   },
@@ -443,39 +492,70 @@ async function registerCommands() {
     ...automod.commands,
     ...updates.commands,
     ...absence.commands,
+    ...invitations.commands,
     // ✅ WorL
     ...worl.commands,
   ].map((c) => c.toJSON());
 
   const rest = new REST({ version: "10" }).setToken(TOKEN);
 
-  if (COMMANDS_SCOPE === "global") {
-    await rest.put(Routes.applicationCommands(CLIENT_ID), { body: commands });
+  const hasInviteCmd = commands.some((c) => c.name === "invite");
+  console.log(`ℹ️ Commandes construites: ${commands.length} (invite présent: ${hasInviteCmd ? "oui" : "non"}).`);
+
+  async function putGlobal() {
+    const created = await rest.put(Routes.applicationCommands(CLIENT_ID), { body: commands });
+    const names = Array.isArray(created) ? created.map((c) => c.name) : [];
     console.log("✅ Slash commands enregistrées en GLOBAL (multi-serveur).");
-    return;
+    console.log("ℹ️ Les commandes globales peuvent prendre quelques minutes à apparaître sur Discord.");
+    console.log(`ℹ️ GLOBAL: ${names.length} commandes reçues par l'API (invite: ${names.includes("invite") ? "oui" : "non"}).`);
   }
 
-  if (COMMANDS_SCOPE === "guild") {
-    await rest.put(Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID), { body: commands });
-    console.log(`✅ Slash commands enregistrées sur le serveur (GUILD_ID=${GUILD_ID}).`);
-    return;
+  async function putGuild(guildId) {
+    const created = await rest.put(Routes.applicationGuildCommands(CLIENT_ID, guildId), { body: commands });
+    const names = Array.isArray(created) ? created.map((c) => c.name) : [];
+    console.log(`✅ Slash commands enregistrées sur le serveur (GUILD_ID=${guildId}).`);
+    console.log(`ℹ️ GUILD ${guildId}: ${names.length} commandes reçues par l'API (invite: ${names.includes("invite") ? "oui" : "non"}).`);
   }
 
-  if (COMMANDS_SCOPE === "both") {
-    await rest.put(Routes.applicationCommands(CLIENT_ID), { body: commands });
-    await rest.put(Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID), { body: commands });
-    console.log("✅ Slash commands enregistrées en GLOBAL + GUILD (mode hybride).");
-    return;
-  }
+  try {
+    if (COMMANDS_SCOPE === "global") {
+      await putGlobal();
+      if (GUILD_ID) {
+        await putGuild(GUILD_ID);
+        console.log("ℹ️ Bonus: commandes aussi poussées en GUILD pour apparition instantanée.");
+      }
+      return;
+    }
 
-  console.warn(
-    `⚠️ COMMANDS_SCOPE invalide: '${COMMANDS_SCOPE}'.\nMets global|guild|both.\n(fallback => global)`
-  );
-  await rest.put(Routes.applicationCommands(CLIENT_ID), { body: commands });
+    if (COMMANDS_SCOPE === "guild") {
+      await putGuild(GUILD_ID);
+      return;
+    }
+
+    if (COMMANDS_SCOPE === "both") {
+      await putGlobal();
+      await putGuild(GUILD_ID);
+      console.log("✅ Slash commands enregistrées en GLOBAL + GUILD (mode hybride).");
+      return;
+    }
+
+    console.warn(
+      `⚠️ COMMANDS_SCOPE invalide: '${COMMANDS_SCOPE}'.\nMets global|guild|both.\n(fallback => global)`
+    );
+    await putGlobal();
+  } catch (err) {
+    console.error("❌ Échec d'enregistrement des slash commands:", err?.message || err);
+    if (err?.rawError) console.error("rawError:", JSON.stringify(err.rawError));
+    if (err?.requestBody?.json) {
+      const names = err.requestBody.json.map((c) => c.name);
+      console.error(`payload size=${names.length}; contient invite=${names.includes("invite")}`);
+    }
+    throw err;
+  }
 }
 
 /* ----------------------------- Ready ------------------------------ */
-client.once("ready", async () => {
+client.once("clientReady", async () => {
   console.log(`✅ Connecté en tant que ${client.user.tag}`);
 
   // ✅ Rotation des activités (status)
@@ -502,18 +582,33 @@ client.once("ready", async () => {
   updatePresence(); // 🔥 direct
   setInterval(updatePresence, 15_000); // toutes les 15s
 
-  try {
-    await initDb();
-    await registerCommands();
+  async function tryDbBootstrap() {
+    if (dbBootstrapped) return;
+    try {
+      await initDb();
+      dbBootstrapped = true;
+      console.log("✅ DB connectée, activation des tâches dépendantes DB.");
 
-    // vouchboard init + refresh
-    for (const g of client.guilds.cache.values()) {
-      await vouches.updateVouchboardMessage(client, g.id).catch(() => {});
+      // vouchboard init + refresh
+      for (const g of client.guilds.cache.values()) {
+        await vouches.updateVouchboardMessage(client, g.id).catch(() => {});
+      }
+      vouches.startGlobalVouchboardUpdater(client);
+
+      // giveaways sweeper
+      giveaways.startGlobalGiveawaySweeper(client);
+    } catch (err) {
+      console.error("❌ DB indisponible au démarrage (mode dégradé).", err?.message || err);
+      setTimeout(() => {
+        tryDbBootstrap().catch(() => {});
+      }, DB_RETRY_MS);
     }
-    vouches.startGlobalVouchboardUpdater(client);
+  }
 
-    // giveaways sweeper
-    giveaways.startGlobalGiveawaySweeper(client);
+  try {
+    await registerCommands();
+    await invitations.primeCache(client);
+    await tryDbBootstrap();
   } catch (err) {
     console.error("Erreur au démarrage:", err);
     process.exit(1);
@@ -547,6 +642,9 @@ client.on("interactionCreate", async (interaction) => {
 
     // Absence
     if (await absence.handleInteraction(interaction, client)) return;
+
+    // Invitations
+    if (await invitations.handleInteraction(interaction, client)) return;
 
     // ✅ WorL (boutons + /worl)
     if (await worl.handleInteraction(interaction, client)) return;
@@ -598,6 +696,7 @@ client.on("guildMemberAdd", async (member) => {
   try {
     await automod.handleGuildMemberAdd(member, client);
     await moderation.handleGuildMemberAdd?.(member, client);
+    await invitations.handleGuildMemberAdd(member, client);
   } catch (e) {
     console.error("guildMemberAdd fatal:", e);
   }
@@ -624,6 +723,30 @@ client.on("webhooksUpdate", async (channel) => {
     await automod.handleWebhooksUpdate(channel, client);
   } catch (e) {
     console.error("webhooksUpdate fatal:", e);
+  }
+});
+
+client.on("guildMemberRemove", async (member) => {
+  try {
+    await invitations.handleGuildMemberRemove(member, client);
+  } catch (e) {
+    console.error("guildMemberRemove fatal:", e);
+  }
+});
+
+client.on("inviteCreate", async (invite) => {
+  try {
+    await invitations.handleInviteCreate(invite, client);
+  } catch (e) {
+    console.error("inviteCreate fatal:", e);
+  }
+});
+
+client.on("inviteDelete", async (invite) => {
+  try {
+    await invitations.handleInviteDelete(invite, client);
+  } catch (e) {
+    console.error("inviteDelete fatal:", e);
   }
 });
 
