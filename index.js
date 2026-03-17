@@ -115,6 +115,9 @@ const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: process.env.NODE_ENV === "production" ? { rejectUnauthorized: false } : false,
 });
+const DB_RETRY_MS = Number(process.env.DB_RETRY_MS || 30000);
+let dbBootstrapped = false;
+
 
 async function initDb() {
   await pool.query(`
@@ -496,30 +499,59 @@ async function registerCommands() {
 
   const rest = new REST({ version: "10" }).setToken(TOKEN);
 
-  if (COMMANDS_SCOPE === "global") {
-    await rest.put(Routes.applicationCommands(CLIENT_ID), { body: commands });
+  const hasInviteCmd = commands.some((c) => c.name === "invite");
+  console.log(`ℹ️ Commandes construites: ${commands.length} (invite présent: ${hasInviteCmd ? "oui" : "non"}).`);
+
+  async function putGlobal() {
+    const created = await rest.put(Routes.applicationCommands(CLIENT_ID), { body: commands });
+    const names = Array.isArray(created) ? created.map((c) => c.name) : [];
     console.log("✅ Slash commands enregistrées en GLOBAL (multi-serveur).");
     console.log("ℹ️ Les commandes globales peuvent prendre quelques minutes à apparaître sur Discord.");
-    return;
+    console.log(`ℹ️ GLOBAL: ${names.length} commandes reçues par l'API (invite: ${names.includes("invite") ? "oui" : "non"}).`);
   }
 
-  if (COMMANDS_SCOPE === "guild") {
-    await rest.put(Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID), { body: commands });
-    console.log(`✅ Slash commands enregistrées sur le serveur (GUILD_ID=${GUILD_ID}).`);
-    return;
+  async function putGuild(guildId) {
+    const created = await rest.put(Routes.applicationGuildCommands(CLIENT_ID, guildId), { body: commands });
+    const names = Array.isArray(created) ? created.map((c) => c.name) : [];
+    console.log(`✅ Slash commands enregistrées sur le serveur (GUILD_ID=${guildId}).`);
+    console.log(`ℹ️ GUILD ${guildId}: ${names.length} commandes reçues par l'API (invite: ${names.includes("invite") ? "oui" : "non"}).`);
   }
 
-  if (COMMANDS_SCOPE === "both") {
-    await rest.put(Routes.applicationCommands(CLIENT_ID), { body: commands });
-    await rest.put(Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID), { body: commands });
-    console.log("✅ Slash commands enregistrées en GLOBAL + GUILD (mode hybride).");
-    return;
-  }
+  try {
+    if (COMMANDS_SCOPE === "global") {
+      await putGlobal();
+      if (GUILD_ID) {
+        await putGuild(GUILD_ID);
+        console.log("ℹ️ Bonus: commandes aussi poussées en GUILD pour apparition instantanée.");
+      }
+      return;
+    }
 
-  console.warn(
-    `⚠️ COMMANDS_SCOPE invalide: '${COMMANDS_SCOPE}'.\nMets global|guild|both.\n(fallback => global)`
-  );
-  await rest.put(Routes.applicationCommands(CLIENT_ID), { body: commands });
+    if (COMMANDS_SCOPE === "guild") {
+      await putGuild(GUILD_ID);
+      return;
+    }
+
+    if (COMMANDS_SCOPE === "both") {
+      await putGlobal();
+      await putGuild(GUILD_ID);
+      console.log("✅ Slash commands enregistrées en GLOBAL + GUILD (mode hybride).");
+      return;
+    }
+
+    console.warn(
+      `⚠️ COMMANDS_SCOPE invalide: '${COMMANDS_SCOPE}'.\nMets global|guild|both.\n(fallback => global)`
+    );
+    await putGlobal();
+  } catch (err) {
+    console.error("❌ Échec d'enregistrement des slash commands:", err?.message || err);
+    if (err?.rawError) console.error("rawError:", JSON.stringify(err.rawError));
+    if (err?.requestBody?.json) {
+      const names = err.requestBody.json.map((c) => c.name);
+      console.error(`payload size=${names.length}; contient invite=${names.includes("invite")}`);
+    }
+    throw err;
+  }
 }
 
 /* ----------------------------- Ready ------------------------------ */
@@ -550,19 +582,33 @@ client.once("clientReady", async () => {
   updatePresence(); // 🔥 direct
   setInterval(updatePresence, 15_000); // toutes les 15s
 
+  async function tryDbBootstrap() {
+    if (dbBootstrapped) return;
+    try {
+      await initDb();
+      dbBootstrapped = true;
+      console.log("✅ DB connectée, activation des tâches dépendantes DB.");
+
+      // vouchboard init + refresh
+      for (const g of client.guilds.cache.values()) {
+        await vouches.updateVouchboardMessage(client, g.id).catch(() => {});
+      }
+      vouches.startGlobalVouchboardUpdater(client);
+
+      // giveaways sweeper
+      giveaways.startGlobalGiveawaySweeper(client);
+    } catch (err) {
+      console.error("❌ DB indisponible au démarrage (mode dégradé).", err?.message || err);
+      setTimeout(() => {
+        tryDbBootstrap().catch(() => {});
+      }, DB_RETRY_MS);
+    }
+  }
+
   try {
-    await initDb();
     await registerCommands();
     await invitations.primeCache(client);
-
-    // vouchboard init + refresh
-    for (const g of client.guilds.cache.values()) {
-      await vouches.updateVouchboardMessage(client, g.id).catch(() => {});
-    }
-    vouches.startGlobalVouchboardUpdater(client);
-
-    // giveaways sweeper
-    giveaways.startGlobalGiveawaySweeper(client);
+    await tryDbBootstrap();
   } catch (err) {
     console.error("Erreur au démarrage:", err);
     process.exit(1);
