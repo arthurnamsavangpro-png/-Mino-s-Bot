@@ -457,6 +457,71 @@ function createModerationService({ pool, config }) {
           .setRequired(false)
       ),
 
+    // /keywordrole
+    new SlashCommandBuilder()
+      .setName('keywordrole')
+      .setDescription('Gérer les rôles automatiques via mots-clés (bio/statut)')
+      .addSubcommand((sc) =>
+        sc
+          .setName('add')
+          .setDescription('Ajouter une règle mot-clé -> rôle')
+          .addStringOption((opt) =>
+            opt.setName('mot_cle').setDescription('Mot-clé à détecter').setRequired(true).setMaxLength(100)
+          )
+          .addRoleOption((opt) =>
+            opt.setName('role').setDescription('Rôle à attribuer').setRequired(true)
+          )
+          .addStringOption((opt) =>
+            opt
+              .setName('source')
+              .setDescription('Où détecter le mot-clé')
+              .setRequired(false)
+              .addChoices(
+                { name: 'Statut', value: 'status' },
+                { name: 'Bio', value: 'bio' },
+                { name: 'Bio + statut', value: 'both' }
+              )
+          )
+      )
+      .addSubcommand((sc) =>
+        sc
+          .setName('remove')
+          .setDescription('Retirer une règle exacte')
+          .addStringOption((opt) =>
+            opt.setName('mot_cle').setDescription('Mot-clé').setRequired(true).setMaxLength(100)
+          )
+          .addRoleOption((opt) =>
+            opt.setName('role').setDescription('Rôle ciblé').setRequired(true)
+          )
+          .addStringOption((opt) =>
+            opt
+              .setName('source')
+              .setDescription('Source de la règle')
+              .setRequired(false)
+              .addChoices(
+                { name: 'Statut', value: 'status' },
+                { name: 'Bio', value: 'bio' },
+                { name: 'Bio + statut', value: 'both' }
+              )
+          )
+      )
+      .addSubcommand((sc) =>
+        sc
+          .setName('list')
+          .setDescription('Lister les règles configurées')
+      )
+      .addSubcommand((sc) =>
+        sc
+          .setName('sync')
+          .setDescription('Re-synchroniser les rôles par mots-clés sur tous les membres')
+          .addBooleanOption((opt) =>
+            opt
+              .setName('inclure_bots')
+              .setDescription('Inclure les bots')
+              .setRequired(false)
+          )
+      ),
+
     // /log
     new SlashCommandBuilder()
       .setName('log')
@@ -674,6 +739,103 @@ function createModerationService({ pool, config }) {
     );
 
     return { role_ids: cleaned };
+  }
+
+  async function listKeywordRoleRules(guildId) {
+    const res = await pool.query(
+      `SELECT guild_id, keyword, role_id, source
+       FROM keyword_role_rules
+       WHERE guild_id=$1
+       ORDER BY keyword ASC, role_id ASC, source ASC`,
+      [guildId]
+    );
+    return res.rows.map((r) => ({
+      guild_id: r.guild_id,
+      keyword: String(r.keyword || '').toLowerCase(),
+      role_id: r.role_id,
+      source: ['status', 'bio', 'both'].includes(r.source) ? r.source : 'both',
+    }));
+  }
+
+  async function addKeywordRoleRule(guildId, keyword, roleId, source) {
+    await pool.query(
+      `INSERT INTO keyword_role_rules (guild_id, keyword, role_id, source)
+       VALUES ($1,$2,$3,$4)
+       ON CONFLICT (guild_id, keyword, role_id, source) DO UPDATE
+         SET updated_at=NOW()`,
+      [guildId, String(keyword || '').trim().toLowerCase(), roleId, source]
+    );
+  }
+
+  async function removeKeywordRoleRule(guildId, keyword, roleId, source) {
+    const params = [guildId, String(keyword || '').trim().toLowerCase(), roleId];
+    let sql = `DELETE FROM keyword_role_rules WHERE guild_id=$1 AND keyword=$2 AND role_id=$3`;
+    if (source) {
+      params.push(source);
+      sql += ` AND source=$4`;
+    }
+    const res = await pool.query(sql, params);
+    return Number(res.rowCount || 0);
+  }
+
+  function textIncludesKeyword(text, keyword) {
+    if (!text || !keyword) return false;
+    return String(text).toLowerCase().includes(String(keyword).toLowerCase());
+  }
+
+  function extractStatusText(member) {
+    const presence = member?.presence;
+    if (!presence?.activities?.length) return '';
+    return presence.activities
+      .map((a) => [a.name, a.state, a.details].filter(Boolean).join(' '))
+      .join(' ')
+      .trim();
+  }
+
+  function extractBioText(member) {
+    // Discord n'expose pas toujours la bio via l'API gateway selon le contexte/intents.
+    return String(member?.user?.bio || '').trim();
+  }
+
+  async function applyKeywordRolesForMember(member, options = {}) {
+    if (!member?.guild) return { changed: 0 };
+
+    const rules = await listKeywordRoleRules(member.guild.id);
+    if (!rules.length) return { changed: 0 };
+
+    const me = await member.guild.members.fetchMe().catch(() => null);
+    if (!me) return { changed: 0 };
+
+    const statusText = extractStatusText(member);
+    const bioText = extractBioText(member);
+
+    let changed = 0;
+    for (const rule of rules) {
+      const role = member.guild.roles.cache.get(rule.role_id);
+      if (!role || role.managed) continue;
+      if (me.roles.highest.comparePositionTo(role) <= 0) continue;
+
+      const matchStatus = rule.source === 'status' || rule.source === 'both'
+        ? textIncludesKeyword(statusText, rule.keyword)
+        : false;
+      const matchBio = rule.source === 'bio' || rule.source === 'both'
+        ? textIncludesKeyword(bioText, rule.keyword)
+        : false;
+      const shouldHave = matchStatus || matchBio;
+      const hasRoleAlready = member.roles.cache.has(role.id);
+
+      if (shouldHave && !hasRoleAlready) {
+        await member.roles.add(role.id, options.reason || `Mot-clé détecté: ${rule.keyword}`).catch(() => null);
+        changed += 1;
+      }
+
+      if (!shouldHave && hasRoleAlready) {
+        await member.roles.remove(role.id, options.reason || `Mot-clé absent: ${rule.keyword}`).catch(() => null);
+        changed += 1;
+      }
+    }
+
+    return { changed };
   }
 
   function sanitizeAutoroleRoleIds(guild, roleIds) {
@@ -2374,13 +2536,100 @@ function createModerationService({ pool, config }) {
     return true;
   }
 
+  async function handleKeywordRole(interaction, client) {
+    const settings = await getSettings(interaction.guildId);
+
+    if (!mustHave(interaction, PermissionsBitField.Flags.ManageRoles, settings.staff_role_id)) {
+      await interaction.reply({
+        content: '⛔ Il faut la permission **Gérer les rôles** (ou être staff) pour faire ça.',
+        ephemeral: true,
+      });
+      return true;
+    }
+
+    const guild = interaction.guild;
+    if (!guild) {
+      await interaction.reply({ content: '⚠️ Serveur introuvable.', ephemeral: true });
+      return true;
+    }
+
+    const sub = interaction.options.getSubcommand();
+
+    if (sub === 'add') {
+      const keyword = interaction.options.getString('mot_cle', true).trim().toLowerCase();
+      const role = interaction.options.getRole('role', true);
+      const source = interaction.options.getString('source') || 'both';
+
+      if (!keyword) {
+        await interaction.reply({ content: '⚠️ Mot-clé invalide.', ephemeral: true });
+        return true;
+      }
+
+      await addKeywordRoleRule(interaction.guildId, keyword, role.id, source);
+      await interaction.reply({
+        content: `✅ Règle ajoutée: mot-clé **${keyword}** -> ${role} (source: **${source}**).`,
+        ephemeral: true,
+      });
+      return true;
+    }
+
+    if (sub === 'remove') {
+      const keyword = interaction.options.getString('mot_cle', true).trim().toLowerCase();
+      const role = interaction.options.getRole('role', true);
+      const source = interaction.options.getString('source') || null;
+
+      const removed = await removeKeywordRoleRule(interaction.guildId, keyword, role.id, source);
+      await interaction.reply({
+        content: removed
+          ? `✅ ${removed} règle(s) supprimée(s) pour **${keyword}** -> ${role}.`
+          : `ℹ️ Aucune règle trouvée pour **${keyword}** -> ${role}.`,
+        ephemeral: true,
+      });
+      return true;
+    }
+
+    if (sub === 'list') {
+      const rules = await listKeywordRoleRules(interaction.guildId);
+      if (!rules.length) {
+        await interaction.reply({ content: 'ℹ️ Aucune règle mot-clé configurée.', ephemeral: true });
+        return true;
+      }
+
+      const lines = rules.slice(0, 40).map((r) => `• **${r.keyword}** -> <@&${r.role_id}> _(source: ${r.source})_`);
+      await interaction.reply({
+        content: `📋 Règles mot-clé (${rules.length})\n${lines.join('\n')}`,
+        ephemeral: true,
+      });
+      return true;
+    }
+
+    if (sub === 'sync') {
+      const includeBots = interaction.options.getBoolean('inclure_bots') ?? false;
+      await interaction.deferReply({ ephemeral: true });
+
+      const members = await guild.members.fetch();
+      let processed = 0;
+      let changed = 0;
+
+      for (const member of members.values()) {
+        if (!includeBots && member.user?.bot) continue;
+        const result = await applyKeywordRolesForMember(member, { reason: `Sync mot-clé par ${interaction.user.tag}` });
+        processed += 1;
+        changed += Number(result.changed || 0);
+      }
+
+      await interaction.editReply(`✅ Sync terminée. Membres vérifiés: **${processed}** • Changements: **${changed}**.`);
+      return true;
+    }
+
+    return false;
+  }
+
   async function handleGuildMemberAdd(member, client) {
     if (!member?.guild) return false;
 
     const auto = await getAutoroleSettings(member.guild.id);
     let roleIds = sanitizeAutoroleRoleIds(member.guild, auto.role_ids);
-
-    if (!roleIds.length) return false;
 
     const me = await member.guild.members.fetchMe().catch(() => null);
     if (!me) return false;
@@ -2390,12 +2639,35 @@ function createModerationService({ pool, config }) {
       return role && me.roles.highest.comparePositionTo(role) > 0;
     });
 
-    if (!roleIds.length) return false;
-
     for (const roleId of roleIds) {
       await member.roles.add(roleId, "Auto-rôle à l'arrivée").catch(() => null);
     }
 
+    await applyKeywordRolesForMember(member, { reason: "Rôle mot-clé à l'arrivée" });
+
+    return false;
+  }
+
+  async function handleGuildMemberUpdate(oldMember, newMember, client) {
+    if (!newMember?.guild) return false;
+    await applyKeywordRolesForMember(newMember, { reason: 'Mise à jour membre (bio/statut)' });
+    return false;
+  }
+
+  async function handlePresenceUpdate(oldPresence, newPresence, client) {
+    const member = newPresence?.member || oldPresence?.member;
+    if (!member?.guild) return false;
+    await applyKeywordRolesForMember(member, { reason: 'Mise à jour statut' });
+    return false;
+  }
+
+  async function handleUserUpdate(oldUser, newUser, client) {
+    if (!client?.guilds?.cache?.size) return false;
+    for (const guild of client.guilds.cache.values()) {
+      const member = await guild.members.fetch(newUser.id).catch(() => null);
+      if (!member) continue;
+      await applyKeywordRolesForMember(member, { reason: 'Mise à jour bio utilisateur' });
+    }
     return false;
   }
 
@@ -2420,6 +2692,7 @@ function createModerationService({ pool, config }) {
     if (name === 'log') return handleLog(interaction, client);
     if (name === 'autorole') return handleAutorole(interaction, client);
     if (name === 'forcerole') return handleForceRole(interaction, client);
+    if (name === 'keywordrole') return handleKeywordRole(interaction, client);
 
     return false;
   }
@@ -2429,6 +2702,9 @@ function createModerationService({ pool, config }) {
     handleInteraction,
     handleMessage,
     handleGuildMemberAdd,
+    handleGuildMemberUpdate,
+    handlePresenceUpdate,
+    handleUserUpdate,
   };
 }
 
