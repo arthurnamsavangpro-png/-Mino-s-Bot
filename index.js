@@ -499,6 +499,7 @@ async function registerCommands() {
   if (COMMANDS_SCOPE === "global") {
     await rest.put(Routes.applicationCommands(CLIENT_ID), { body: commands });
     console.log("✅ Slash commands enregistrées en GLOBAL (multi-serveur).");
+    console.log("ℹ️ Les commandes globales peuvent prendre quelques minutes à apparaître sur Discord.");
     return;
   }
 
@@ -522,7 +523,7 @@ async function registerCommands() {
 }
 
 /* ----------------------------- Ready ------------------------------ */
-client.once("ready", async () => {
+client.once("clientReady", async () => {
   console.log(`✅ Connecté en tant que ${client.user.tag}`);
 
   // ✅ Rotation des activités (status)

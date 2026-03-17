@@ -8,14 +8,14 @@ const {
 function createInvitationsService({ pool }) {
   const inviteCache = new Map(); // guildId -> Map(code -> uses)
 
-  const commands = [
-    new SlashCommandBuilder()
-      .setName('invite')
-      .setDescription('Système d\'invitations avancé (profil, classement, rewards, admin)')
+  function buildInviteCommand(commandName) {
+    return new SlashCommandBuilder()
+      .setName(commandName)
+      .setDescription("Système d'invitations avancé (profil, classement, rewards, admin)")
       .addSubcommand((sub) =>
         sub
           .setName('profil')
-          .setDescription('Affiche le profil invitation d\'un membre')
+          .setDescription("Affiche le profil invitation d'un membre")
           .addUserOption((opt) =>
             opt.setName('membre').setDescription('Membre ciblé').setRequired(false)
           )
@@ -83,7 +83,7 @@ function createInvitationsService({ pool }) {
       .addSubcommand((sub) =>
         sub
           .setName('bonus')
-          .setDescription('Ajouter/retirer un bonus manuel d\'invites à un membre')
+          .setDescription("Ajouter/retirer un bonus manuel d'invites à un membre")
           .addUserOption((opt) => opt.setName('membre').setDescription('Membre ciblé').setRequired(true))
           .addIntegerOption((opt) =>
             opt
@@ -105,8 +105,10 @@ function createInvitationsService({ pool }) {
         sub
           .setName('sync')
           .setDescription('Recalcule les récompenses sur tous les membres suivis')
-      ),
-  ];
+      );
+  }
+
+  const commands = [buildInviteCommand('invite'), buildInviteCommand('invites')];
 
   async function getSettings(guildId) {
     const res = await pool.query(
@@ -344,7 +346,7 @@ function createInvitationsService({ pool }) {
   }
 
   async function handleInteraction(interaction) {
-    if (!interaction.isChatInputCommand() || interaction.commandName !== 'invite') return false;
+    if (!interaction.isChatInputCommand() || !['invite', 'invites'].includes(interaction.commandName)) return false;
     if (!interaction.guildId) {
       await interaction.reply({ content: '⚠️ Commande disponible uniquement en serveur.', flags: MessageFlags.Ephemeral });
       return true;
