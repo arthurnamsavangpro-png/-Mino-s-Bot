@@ -3,6 +3,11 @@ const {
   EmbedBuilder,
   PermissionsBitField,
   ChannelType,
+  ActionRowBuilder,
+  RoleSelectMenuBuilder,
+  StringSelectMenuBuilder,
+  ButtonBuilder,
+  ButtonStyle,
 } = require('discord.js');
 
 const RED = 0xff0000;
@@ -373,21 +378,7 @@ function createModerationService({ pool, config }) {
     // /autorole
     new SlashCommandBuilder()
       .setName('autorole')
-      .setDescription('Définir le rôle automatique pour les nouveaux membres')
-      .addSubcommand((sc) =>
-        sc
-          .setName('set')
-          .setDescription('Définir le rôle automatique')
-          .addRoleOption((opt) =>
-            opt.setName('role').setDescription('Rôle à attribuer').setRequired(true)
-          )
-      )
-      .addSubcommand((sc) =>
-        sc.setName('off').setDescription('Désactiver le rôle automatique')
-      )
-      .addSubcommand((sc) =>
-        sc.setName('status').setDescription('Voir le rôle automatique actuel')
-      ),
+      .setDescription('Ouvrir le panneau de configuration des rôles automatiques'),
 
     // /forcerole
     new SlashCommandBuilder()
@@ -583,27 +574,103 @@ function createModerationService({ pool, config }) {
 
   async function getAutoroleSettings(guildId) {
     const res = await pool.query(
-      `SELECT role_id FROM autorole_settings WHERE guild_id=$1 LIMIT 1`,
+      `SELECT role_id, role_ids FROM autorole_settings WHERE guild_id=$1 LIMIT 1`,
       [guildId]
     );
-    return {
-      role_id: res.rows[0]?.role_id || null,
-    };
+
+    const row = res.rows[0] || null;
+    if (!row) {
+      return { role_ids: [] };
+    }
+
+    const fromJson = Array.isArray(row.role_ids)
+      ? row.role_ids.filter((r) => typeof r === 'string' && r)
+      : [];
+
+    if (fromJson.length) {
+      return { role_ids: [...new Set(fromJson)] };
+    }
+
+    if (row.role_id) {
+      return { role_ids: [row.role_id] };
+    }
+
+    return { role_ids: [] };
   }
 
-  async function saveAutoroleSettings(guildId, roleId) {
+  async function saveAutoroleSettings(guildId, roleIds) {
+    const cleaned = [...new Set((roleIds || []).filter((r) => typeof r === 'string' && r))].slice(0, 25);
     await pool.query(
-      `INSERT INTO autorole_settings (guild_id, role_id)
-       VALUES ($1,$2)
+      `INSERT INTO autorole_settings (guild_id, role_id, role_ids)
+       VALUES ($1,$2,$3::jsonb)
        ON CONFLICT (guild_id) DO UPDATE
          SET role_id=EXCLUDED.role_id,
+             role_ids=EXCLUDED.role_ids,
              updated_at=NOW()`,
-      [guildId, roleId || null]
+      [guildId, cleaned[0] || null, JSON.stringify(cleaned)]
     );
 
-    return { role_id: roleId || null };
+    return { role_ids: cleaned };
   }
 
+  function sanitizeAutoroleRoleIds(guild, roleIds) {
+    const uniq = [...new Set((roleIds || []).filter((r) => typeof r === 'string' && r))];
+    return uniq.filter((roleId) => {
+      const role = guild.roles.cache.get(roleId);
+      return !!role && !role.managed;
+    });
+  }
+
+  function buildAutorolePanel(guild, roleIds) {
+    const rolesText = roleIds.length
+      ? roleIds.map((id) => `<@&${id}>`).join('\n')
+      : 'Aucun rôle configuré.';
+
+    const embed = redEmbed()
+      .setTitle('⚙️ Configuration Auto-rôles')
+      .setDescription('Choisis un ou plusieurs rôles à attribuer automatiquement aux nouveaux membres.')
+      .addFields({ name: 'Rôles par défaut', value: rolesText, inline: false });
+
+    const addRow = new ActionRowBuilder().addComponents(
+      new RoleSelectMenuBuilder()
+        .setCustomId('autorole:add')
+        .setPlaceholder('Ajouter un ou plusieurs rôles')
+        .setMinValues(1)
+        .setMaxValues(25)
+    );
+
+    const removeMenu = new StringSelectMenuBuilder()
+      .setCustomId('autorole:remove')
+      .setPlaceholder(roleIds.length ? 'Retirer un ou plusieurs rôles' : 'Aucun rôle à retirer')
+      .setMinValues(1)
+      .setMaxValues(Math.max(1, Math.min(roleIds.length, 25)))
+      .setDisabled(roleIds.length === 0);
+
+    if (roleIds.length) {
+      removeMenu.addOptions(
+        roleIds.slice(0, 25).map((roleId) => ({
+          label: guild.roles.cache.get(roleId)?.name?.slice(0, 100) || roleId,
+          value: roleId,
+        }))
+      );
+    } else {
+      removeMenu.addOptions({ label: 'Aucun rôle', value: 'none' });
+    }
+
+    const removeRow = new ActionRowBuilder().addComponents(removeMenu);
+    const resetRow = new ActionRowBuilder().addComponents(
+      new ButtonBuilder()
+        .setCustomId('autorole:clear')
+        .setLabel('Réinitialiser')
+        .setStyle(ButtonStyle.Danger)
+        .setDisabled(roleIds.length === 0)
+    );
+
+    return {
+      embeds: [embed],
+      components: [addRow, removeRow, resetRow],
+    };
+  }
 
   async function sendModLog(guild, settings, embed) {
     if (!settings?.modlog_channel_id) return null;
@@ -1931,62 +1998,79 @@ function createModerationService({ pool, config }) {
       return true;
     }
 
-    const sub = interaction.options.getSubcommand();
-
-    if (sub === 'status') {
-      const auto = await getAutoroleSettings(interaction.guildId);
-      const roleText = auto.role_id ? `<@&${auto.role_id}>` : 'Aucun rôle configuré';
-      await interaction.reply({
-        content: `⚙️ Auto-rôle actuel: ${roleText}`,
-        ephemeral: true,
-      });
-      return true;
-    }
-
-    if (sub === 'off') {
-      await saveAutoroleSettings(interaction.guildId, null);
-      await interaction.reply({
-        content: '✅ Auto-rôle désactivé.',
-        ephemeral: true,
-      });
-      return true;
-    }
-
-    const role = interaction.options.getRole('role', true);
     const guild = interaction.guild;
     if (!guild) {
       await interaction.reply({ content: '⚠️ Serveur introuvable.', ephemeral: true });
       return true;
     }
 
-    const me = await guild.members.fetchMe().catch(() => null);
-    if (!me) {
-      await interaction.reply({ content: '⚠️ Bot introuvable.', ephemeral: true });
-      return true;
+    const auto = await getAutoroleSettings(interaction.guildId);
+    const roleIds = sanitizeAutoroleRoleIds(guild, auto.role_ids);
+    if (roleIds.length !== auto.role_ids.length) {
+      await saveAutoroleSettings(interaction.guildId, roleIds);
     }
 
-    if (role.managed) {
-      await interaction.reply({
-        content: '⚠️ Ce rôle est géré par une intégration, je ne peux pas le donner.',
-        ephemeral: true,
-      });
-      return true;
-    }
-
-    if (me.roles.highest.comparePositionTo(role) <= 0) {
-      await interaction.reply({
-        content: '⚠️ Le rôle du bot doit être au-dessus du rôle cible.',
-        ephemeral: true,
-      });
-      return true;
-    }
-
-    await saveAutoroleSettings(interaction.guildId, role.id);
     await interaction.reply({
-      content: `✅ Auto-rôle défini sur ${role}.`,
+      ...buildAutorolePanel(guild, roleIds),
       ephemeral: true,
     });
     return true;
+  }
+
+  async function handleAutoroleComponent(interaction, client) {
+    const settings = await getSettings(interaction.guildId);
+
+    if (!mustHave(interaction, PermissionsBitField.Flags.ManageRoles, settings.staff_role_id)) {
+      await interaction.reply({
+        content: '⛔ Il faut la permission **Gérer les rôles** (ou être staff) pour faire ça.',
+        ephemeral: true,
+      });
+      return true;
+    }
+
+    const guild = interaction.guild;
+    if (!guild) {
+      await interaction.reply({ content: '⚠️ Serveur introuvable.', ephemeral: true });
+      return true;
+    }
+
+    const auto = await getAutoroleSettings(interaction.guildId);
+    let roleIds = sanitizeAutoroleRoleIds(guild, auto.role_ids);
+
+    if (interaction.customId === 'autorole:add' && interaction.isRoleSelectMenu()) {
+      const me = await guild.members.fetchMe().catch(() => null);
+      if (!me) {
+        await interaction.reply({ content: '⚠️ Bot introuvable.', ephemeral: true });
+        return true;
+      }
+
+      const selected = interaction.values
+        .map((id) => guild.roles.cache.get(id))
+        .filter((r) => !!r && !r.managed && me.roles.highest.comparePositionTo(r) > 0)
+        .map((r) => r.id);
+
+      roleIds = [...new Set([...roleIds, ...selected])].slice(0, 25);
+      await saveAutoroleSettings(interaction.guildId, roleIds);
+      await interaction.update(buildAutorolePanel(guild, roleIds));
+      return true;
+    }
+
+    if (interaction.customId === 'autorole:remove' && interaction.isStringSelectMenu()) {
+      const toRemove = new Set(interaction.values);
+      roleIds = roleIds.filter((id) => !toRemove.has(id));
+      await saveAutoroleSettings(interaction.guildId, roleIds);
+      await interaction.update(buildAutorolePanel(guild, roleIds));
+      return true;
+    }
+
+    if (interaction.customId === 'autorole:clear' && interaction.isButton()) {
+      roleIds = [];
+      await saveAutoroleSettings(interaction.guildId, roleIds);
+      await interaction.update(buildAutorolePanel(guild, roleIds));
+      return true;
+    }
+
+    return false;
   }
 
   async function handleForceRole(interaction, client) {
@@ -2079,20 +2163,35 @@ function createModerationService({ pool, config }) {
     if (!member?.guild) return false;
 
     const auto = await getAutoroleSettings(member.guild.id);
-    if (!auto.role_id) return false;
+    let roleIds = sanitizeAutoroleRoleIds(member.guild, auto.role_ids);
 
-    const role = await member.guild.roles.fetch(auto.role_id).catch(() => null);
-    if (!role || role.managed) return false;
+    if (!roleIds.length) return false;
 
     const me = await member.guild.members.fetchMe().catch(() => null);
     if (!me) return false;
-    if (me.roles.highest.comparePositionTo(role) <= 0) return false;
 
-    await member.roles.add(role, "Auto-rôle à l'arrivée").catch(() => null);
+    roleIds = roleIds.filter((roleId) => {
+      const role = member.guild.roles.cache.get(roleId);
+      return role && me.roles.highest.comparePositionTo(role) > 0;
+    });
+
+    if (!roleIds.length) return false;
+
+    for (const roleId of roleIds) {
+      await member.roles.add(roleId, "Auto-rôle à l'arrivée").catch(() => null);
+    }
+
     return false;
   }
 
   async function handleInteraction(interaction, client) {
+    if (
+      (interaction.isRoleSelectMenu() || interaction.isStringSelectMenu() || interaction.isButton()) &&
+      String(interaction.customId || '').startsWith('autorole:')
+    ) {
+      return handleAutoroleComponent(interaction, client);
+    }
+
     if (!interaction.isChatInputCommand()) return false;
 
     const name = interaction.commandName;

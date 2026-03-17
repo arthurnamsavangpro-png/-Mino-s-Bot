@@ -277,8 +277,14 @@ async function initDb() {
     CREATE TABLE IF NOT EXISTS autorole_settings (
       guild_id TEXT PRIMARY KEY,
       role_id TEXT,
+      role_ids JSONB NOT NULL DEFAULT '[]'::jsonb,
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
+    ALTER TABLE autorole_settings ADD COLUMN IF NOT EXISTS role_ids JSONB NOT NULL DEFAULT '[]'::jsonb;
+    UPDATE autorole_settings
+    SET role_ids = jsonb_build_array(role_id)
+    WHERE role_id IS NOT NULL
+      AND (role_ids IS NULL OR role_ids = '[]'::jsonb);
     CREATE TABLE IF NOT EXISTS mod_case_counters (
       guild_id TEXT PRIMARY KEY,
       last_case BIGINT NOT NULL DEFAULT 0
