@@ -121,7 +121,7 @@ function createInvitationsService({ pool }) {
   async function setSettings(guildId, patch) {
     await pool.query(
       `INSERT INTO invite_settings (guild_id, log_channel_id, fake_min_account_days)
-       VALUES ($1, $2, $3)
+       VALUES ($1, $2, COALESCE($3, 7))
        ON CONFLICT (guild_id) DO UPDATE SET
          log_channel_id = COALESCE($2, invite_settings.log_channel_id),
          fake_min_account_days = COALESCE($3, invite_settings.fake_min_account_days),
