@@ -132,7 +132,9 @@ function createInvitationsService({ pool }) {
       );
   }
 
-  const commands = [buildInviteCommand('invite'), buildInviteCommand('invites')];
+  // NOTE: exposing both /invite and /invites created frequent command-version mismatches
+  // on Discord clients ("commande obsolète"). We keep only /invite for stability.
+  const commands = [buildInviteCommand('invite')];
 
   async function getSettings(guildId) {
     const res = await pool.query(
