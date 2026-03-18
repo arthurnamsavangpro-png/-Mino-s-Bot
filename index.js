@@ -23,6 +23,7 @@ const { createUpdatesService } = require("./updates");
 const { createAbsenceService } = require("./absence");
 const { createInvitationsService } = require("./invitations");
 const { createWelcomeService } = require("./welcome");
+const { createServerStatsService } = require("./serverstats");
 
 // ✅ NOUVEAU : WorL
 const { createWorlService } = require("./worl");
@@ -423,6 +424,16 @@ async function initDb() {
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
 
+    /* --- server stats vocaux --- */
+    CREATE TABLE IF NOT EXISTS server_stats_settings (
+      guild_id TEXT PRIMARY KEY,
+      category_id TEXT,
+      members_channel_id TEXT,
+      bots_channel_id TEXT,
+      enabled BOOLEAN NOT NULL DEFAULT TRUE,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+
     /* ✅ WorL */
     CREATE TABLE IF NOT EXISTS worl_polls (
       poll_id TEXT PRIMARY KEY,
@@ -477,6 +488,7 @@ const updates = createUpdatesService({ pool, config });
 const absence = createAbsenceService({ pool, config });
 const invitations = createInvitationsService({ pool, config });
 const welcome = createWelcomeService({ pool, config });
+const serverstats = createServerStatsService({ pool, config });
 
 // ✅ NOUVEAU
 const worl = createWorlService({ pool, config });
@@ -495,6 +507,7 @@ const help = createHelpService({
     absence,
     invitations,
     welcome,
+    serverstats,
     worl,
     sendMessage,
   },
@@ -517,6 +530,7 @@ async function registerCommands() {
     ...absence.commands,
     ...invitations.commands,
     ...welcome.commands,
+    ...serverstats.commands,
     // ✅ WorL
     ...worl.commands,
   ].map((c) => c.toJSON());
@@ -607,6 +621,11 @@ client.once("clientReady", async () => {
     await registerCommands();
     await invitations.primeCache(client);
 
+    for (const g of client.guilds.cache.values()) {
+      await serverstats.refreshGuildStats(g).catch(() => {});
+    }
+    serverstats.startScheduler(client);
+
     // vouchboard init + refresh
     for (const g of client.guilds.cache.values()) {
       await vouches.updateVouchboardMessage(client, g.id).catch(() => {});
@@ -654,6 +673,9 @@ client.on("interactionCreate", async (interaction) => {
 
     // Bienvenue
     if (await welcome.handleInteraction(interaction, client)) return;
+
+    // Server stats vocaux
+    if (await serverstats.handleInteraction(interaction, client)) return;
 
     // ✅ WorL (boutons + /worl)
     if (await worl.handleInteraction(interaction, client)) return;
@@ -707,6 +729,7 @@ client.on("guildMemberAdd", async (member) => {
     await moderation.handleGuildMemberAdd?.(member, client);
     await invitations.handleGuildMemberAdd(member, client);
     await welcome.handleGuildMemberAdd(member, client);
+    await serverstats.refreshGuildStats(member.guild);
   } catch (e) {
     console.error("guildMemberAdd fatal:", e);
   }
@@ -763,6 +786,7 @@ client.on("webhooksUpdate", async (channel) => {
 client.on("guildMemberRemove", async (member) => {
   try {
     await invitations.handleGuildMemberRemove(member, client);
+    await serverstats.refreshGuildStats(member.guild);
   } catch (e) {
     console.error("guildMemberRemove fatal:", e);
   }
