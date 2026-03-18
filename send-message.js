@@ -203,7 +203,7 @@ function createSendMessageService() {
           return true;
         }
 
-        const eb = new EmbedBuilder().setDescription(embedDesc).setTimestamp();
+        const eb = new EmbedBuilder().setColor(0xff0000).setDescription(embedDesc).setTimestamp();
         if (embedTitle) eb.setTitle(embedTitle);
 
         const replyRes = await resolveReply(targetChannel, replyMsgId);
