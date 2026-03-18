@@ -35,6 +35,9 @@ function createInvitationsService({ pool }) {
       )
       .addSubcommand((sub) => sub.setName('rewards').setDescription('Voir les paliers de récompenses'))
       .addSubcommand((sub) =>
+        sub.setName('panel').setDescription('Panel admin premium (config, métriques, commandes utiles)')
+      )
+      .addSubcommand((sub) =>
         sub
           .setName('annonce')
           .setDescription("Annonce publiquement qui a invité un membre et son total net")
@@ -526,6 +529,124 @@ function createInvitationsService({ pool }) {
         .setTitle('🎁 Paliers de rewards invitations')
         .setDescription(text)
         .setTimestamp();
+      await interaction.reply({ embeds: [embed], flags: MessageFlags.Ephemeral });
+      return true;
+    }
+
+    if (sub === 'panel') {
+      if (!interaction.memberPermissions?.has(PermissionsBitField.Flags.ManageGuild)) {
+        await interaction.reply({
+          content: '❌ Ce panel est réservé aux administrateurs (permission **Gérer le serveur**).',
+          flags: MessageFlags.Ephemeral,
+        });
+        return true;
+      }
+
+      const [settings, leaderboardRes, statsRes, rewards, joinsHealthRes] = await Promise.all([
+        getSettings(guildId),
+        pool.query(
+          `SELECT user_id, total
+           FROM invite_stats
+           WHERE guild_id=$1
+           ORDER BY total DESC, regular DESC
+           LIMIT 5`,
+          [guildId]
+        ),
+        pool.query(
+          `SELECT
+             COUNT(*)::int AS tracked_members,
+             COALESCE(SUM(regular), 0)::int AS valid_invites,
+             COALESCE(SUM(fake), 0)::int AS fake_invites,
+             COALESCE(SUM(left_count), 0)::int AS leaves
+           FROM invite_stats
+           WHERE guild_id=$1`,
+          [guildId]
+        ),
+        fetchRewardRows(guildId),
+        pool.query(
+          `SELECT
+             COUNT(*) FILTER (WHERE status='joined')::int AS active_joins,
+             COUNT(*) FILTER (WHERE is_ambiguous=true AND status='joined')::int AS ambiguous_joins,
+             COUNT(*) FILTER (WHERE inviter_id IS NULL AND status='joined')::int AS unknown_inviter_joins
+           FROM invite_joins
+           WHERE guild_id=$1`,
+          [guildId]
+        ),
+      ]);
+
+      const leaderboardText = leaderboardRes.rows.length
+        ? leaderboardRes.rows
+            .map((row, i) => `**${i + 1}.** <@${row.user_id}> — **${row.total}**`)
+            .join('\n')
+        : 'Aucune donnée pour le moment.';
+      const overview = statsRes.rows[0] || {
+        tracked_members: 0,
+        valid_invites: 0,
+        fake_invites: 0,
+        leaves: 0,
+      };
+      const joinsHealth = joinsHealthRes.rows[0] || {
+        active_joins: 0,
+        ambiguous_joins: 0,
+        unknown_inviter_joins: 0,
+      };
+      const rewardsPreview = rewards.length
+        ? rewards
+            .slice(0, 4)
+            .map((r) => `• <@&${r.role_id}> → **${r.required_invites}**`)
+            .join('\n')
+        : 'Aucun palier configuré.';
+
+      const embed = new EmbedBuilder()
+        .setColor(0x5865f2)
+        .setTitle('✨ Invite Premium Admin Panel')
+        .setDescription(
+          "Vue d'ensemble administrateur: configuration active, qualité du tracking et raccourcis de pilotage."
+        )
+        .addFields(
+          {
+            name: '📊 Statistiques globales',
+            value:
+              `Membres suivis: **${overview.tracked_members}**\n` +
+              `Invites valides: **${overview.valid_invites}**\n` +
+              `Invites suspectes: **${overview.fake_invites}**\n` +
+              `Départs: **${overview.leaves}**`,
+            inline: true,
+          },
+          {
+            name: '🧪 Santé du tracking',
+            value:
+              `Joins actifs suivis: **${joinsHealth.active_joins}**\n` +
+              `Attributions ambiguës: **${joinsHealth.ambiguous_joins}**\n` +
+              `Inviteur inconnu: **${joinsHealth.unknown_inviter_joins}**`,
+            inline: true,
+          },
+          {
+            name: '⚙️ Configuration',
+            value:
+              `Logs: ${settings.log_channel_id ? `<#${settings.log_channel_id}>` : '`Non défini`'}\n` +
+              `Annonces: ${
+                settings.announce_channel_id ? `<#${settings.announce_channel_id}>` : '`Non défini`'
+              }\n` +
+              `Seuil fake: **${Number(settings.fake_min_account_days || 7)} jours**`,
+            inline: true,
+          },
+          { name: '🏅 Top inviteurs (Top 5)', value: leaderboardText, inline: false },
+          { name: '🎁 Rewards configurées', value: rewardsPreview, inline: false },
+          {
+            name: '🛠️ Actions admin rapides',
+            value:
+              '`/invite setfakemin jours:<x>`\n' +
+              '`/invite setlog salon:<#salon>`\n' +
+              '`/invite setannonce salon:<#salon>`\n' +
+              '`/invite setreward role:<@role> invites:<x>`\n' +
+              '`/invite sync`',
+            inline: false,
+          }
+        )
+        .setFooter({ text: 'Panel admin — utilise les commandes ci-dessus pour ajuster le système.' })
+        .setTimestamp();
+
       await interaction.reply({ embeds: [embed], flags: MessageFlags.Ephemeral });
       return true;
     }
