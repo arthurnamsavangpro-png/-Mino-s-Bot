@@ -151,6 +151,23 @@ function isValidHttpUrl(url) {
   }
 }
 
+function parseComponentEmoji(raw) {
+  const input = (raw || "").toString().trim();
+  if (!input) return null;
+
+  const custom = input.match(/^<(?:(a)?):([a-zA-Z0-9_]{2,32}):(\d{17,20})>$/);
+  if (custom) {
+    const [, animated, name, id] = custom;
+    return { id, name, animated: Boolean(animated) };
+  }
+
+  if (/^\d{17,20}$/.test(input)) {
+    return { id: input };
+  }
+
+  return { name: input };
+}
+
 /**
  * Réponse éphémère robuste:
  * - si interaction a deferReply -> editReply
@@ -1796,7 +1813,7 @@ function createTicketsService({ pool, config }) {
             label: c.label,
             value: c.value,
             description: c.description,
-            emoji: c.emoji || undefined,
+            emoji: parseComponentEmoji(c.emoji) || undefined,
           }))
         )
       );
@@ -1881,7 +1898,7 @@ function createTicketsService({ pool, config }) {
             label: c.label,
             value: c.value,
             description: c.description,
-            emoji: c.emoji || undefined,
+            emoji: parseComponentEmoji(c.emoji) || undefined,
           }))
         )
       );
@@ -2435,9 +2452,10 @@ function createTicketsService({ pool, config }) {
           .setCustomId(`ticketp:open:preview:${t.value}:${encodeURIComponent(t.label)}`)
           .setLabel(t.label.slice(0, 80))
           .setStyle(ButtonStyle.Primary);
-        if (t.emoji) {
+        const parsedEmoji = parseComponentEmoji(t.emoji);
+        if (parsedEmoji) {
           try {
-            b.setEmoji(t.emoji);
+            b.setEmoji(parsedEmoji);
           } catch {}
         }
         row.addComponents(b);
@@ -2454,7 +2472,7 @@ function createTicketsService({ pool, config }) {
             label: t.label,
             value: t.value,
             description: t.description,
-            emoji: t.emoji || undefined,
+            emoji: parseComponentEmoji(t.emoji) || undefined,
           }))
         )
       );
@@ -2588,9 +2606,10 @@ function createTicketsService({ pool, config }) {
           .setCustomId(`ticketp:open:${panelId}:${t.value}:${encodeURIComponent(t.label)}`)
           .setLabel(t.label.slice(0, 80))
           .setStyle(ButtonStyle.Primary);
-        if (t.emoji) {
+        const parsedEmoji = parseComponentEmoji(t.emoji);
+        if (parsedEmoji) {
           try {
-            b.setEmoji(t.emoji);
+            b.setEmoji(parsedEmoji);
           } catch {}
         }
         row.addComponents(b);
@@ -2606,7 +2625,7 @@ function createTicketsService({ pool, config }) {
               label: t.label,
               value: t.value,
               description: t.description,
-              emoji: t.emoji || undefined,
+              emoji: parseComponentEmoji(t.emoji) || undefined,
             }))
           )
         );
