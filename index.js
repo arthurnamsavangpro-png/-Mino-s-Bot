@@ -747,6 +747,7 @@ client.on("guildMemberUpdate", async (oldMember, newMember) => {
 client.on("presenceUpdate", async (oldPresence, newPresence) => {
   try {
     await moderation.handlePresenceUpdate?.(oldPresence, newPresence, client);
+    await serverstats.handlePresenceUpdate?.(newPresence);
   } catch (e) {
     console.error("presenceUpdate fatal:", e);
   }
