@@ -1,24 +1,45 @@
 const { REST, Routes } = require('discord.js');
 
+const SERVICE_COMMAND_ORDER = [
+  'ping',
+  'help',
+  'vouches',
+  'rankup',
+  'modrank',
+  'sendMessage',
+  'tickets',
+  'giveaways',
+  'moderation',
+  'automod',
+  'updates',
+  'absence',
+  'invitations',
+  'welcome',
+  'serverstats',
+  'worl',
+];
+
+function toCommandJson(command, serviceName, index) {
+  const json = typeof command?.toJSON === 'function' ? command.toJSON() : command;
+  if (!json || typeof json.name !== 'string' || !json.name.trim()) {
+    throw new Error(
+      `Commande invalide dans le service "${serviceName}" (index ${index}): nom manquant.`
+    );
+  }
+  return json;
+}
+
 function buildCommandsPayload(services) {
-  const commands = [
-    ...services.ping.commands,
-    ...services.help.commands,
-    ...services.vouches.commands,
-    ...services.rankup.commands,
-    ...services.modrank.commands,
-    ...services.sendMessage.commands,
-    ...services.tickets.commands,
-    ...services.giveaways.commands,
-    ...services.moderation.commands,
-    ...services.automod.commands,
-    ...services.updates.commands,
-    ...services.absence.commands,
-    ...services.invitations.commands,
-    ...services.welcome.commands,
-    ...services.serverstats.commands,
-    ...services.worl.commands,
-  ].map((c) => c.toJSON());
+  const safeServices = services || {};
+  const commands = [];
+
+  for (const serviceName of SERVICE_COMMAND_ORDER) {
+    const service = safeServices[serviceName];
+    const serviceCommands = Array.isArray(service?.commands) ? service.commands : [];
+    for (const [index, command] of serviceCommands.entries()) {
+      commands.push(toCommandJson(command, serviceName, index));
+    }
+  }
 
   const seen = new Set();
   const duplicates = new Set();
