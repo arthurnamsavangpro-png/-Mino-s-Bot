@@ -26,6 +26,7 @@ function isStaffCategory(catKey) {
     "welcome",
     "invitations",
     "serverstats",
+    "startnewserver",
   ]);
   return staffCats.has(catKey);
 }
@@ -54,6 +55,15 @@ function flattenCommands(service) {
 
 function createHelpService({ services }) {
   const categories = [
+    {
+      key: "startnewserver",
+      emoji: "🚀",
+      label: "Start New Server",
+      short: "Setup guidé",
+      description: "Assistant ultra-rapide pour lancer la config initiale d’un serveur Discord.",
+      examples: ["/startnewserver"],
+      serviceKeys: ["startnewserver"],
+    },
     {
       key: "vouches",
       emoji: "📩",
@@ -189,6 +199,7 @@ function createHelpService({ services }) {
       examples: ["/help"],
       serviceKeys: [
         "vouches",
+        "startnewserver",
         "rankup",
         "modrank",
         "tickets",
@@ -256,6 +267,7 @@ function createHelpService({ services }) {
           "",
           "### 🚀 Démarrage rapide",
           "1. Configure d’abord les modules staff (tickets, logs, automod, invites).",
+          "0. Lance `/startnewserver` pour suivre la checklist de base.",
           "2. Active ensuite les modules communautaires (vouches, giveaways, worl).",
           "3. Utilise `/help` à tout moment pour retrouver les commandes.",
         ].join("\n")
