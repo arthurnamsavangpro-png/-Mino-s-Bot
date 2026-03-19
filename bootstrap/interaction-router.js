@@ -19,6 +19,7 @@ function createInteractionRouter(services) {
 
   const commandMap = new Map();
   for (const service of orderedServices) {
+    if (typeof service.handleInteraction !== 'function') continue;
     for (const command of service.commands || []) {
       const json = typeof command.toJSON === 'function' ? command.toJSON() : command;
       if (!json?.name) continue;
@@ -34,6 +35,7 @@ function createInteractionRouter(services) {
       // Routage explicite: si la commande est connue, on n'interroge que ses handlers.
       if (scopedServices.length) {
         for (const service of scopedServices) {
+          if (typeof service.handleInteraction !== 'function') continue;
           if (await service.handleInteraction(interaction, client)) return true;
         }
         return false;
@@ -41,6 +43,7 @@ function createInteractionRouter(services) {
 
       // Fallback uniquement pour commandes inconnues (compat/legacy).
       for (const service of orderedServices) {
+        if (typeof service.handleInteraction !== 'function') continue;
         if (await service.handleInteraction(interaction, client)) return true;
       }
       return false;
@@ -48,6 +51,7 @@ function createInteractionRouter(services) {
 
     // Components/modals: certains services multiplexent via customId.
     for (const service of orderedServices) {
+      if (typeof service.handleInteraction !== 'function') continue;
       if (await service.handleInteraction(interaction, client)) return true;
     }
     return false;

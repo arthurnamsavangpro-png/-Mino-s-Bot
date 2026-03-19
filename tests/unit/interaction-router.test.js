@@ -92,3 +92,19 @@ test('dispatchInteraction supports non-slash interactions', async () => {
   assert.equal(handled, true);
   assert.ok(marker.includes('automod:btn'));
 });
+
+test('dispatchInteraction ignores invalid scoped service and falls back safely', async () => {
+  const marker = [];
+  const services = makeServices(marker, {
+    tickets: {
+      commands: [{ toJSON: () => ({ name: 'ticket-panel' }) }],
+    },
+  });
+
+  const router = createInteractionRouter(services);
+  const interaction = { isChatInputCommand: () => true, commandName: 'ticket-panel' };
+  const handled = await router.dispatchInteraction(interaction, {});
+
+  assert.equal(handled, false);
+  assert.equal(marker.length, 14);
+});
