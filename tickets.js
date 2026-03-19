@@ -3459,11 +3459,6 @@ function createTicketsService({ pool, config }) {
 
     const mentionTarget = message.mentions.users.first() || null;
     const target = mentionTarget || message.author;
-    const reason = parts.filter((p) => !/^<@!?\d+>$/.test(p)).join(" ").trim();
-    if (!reason) {
-      await message.reply("⚠️ Tu dois préciser une raison. Exemple: `+claim prise en charge facturation`");
-      return true;
-    }
 
     if (!ticket.claimed_by) {
       const upd = await pool.query(
@@ -3525,9 +3520,7 @@ function createTicketsService({ pool, config }) {
       );
     }
 
-    await message.reply(
-      `✅ Prise en charge mise à jour par <@${message.author.id}> pour <@${target.id}>.\n📝 Raison: ${reason}`
-    );
+    await message.reply(`✅ Prise en charge mise à jour par <@${message.author.id}> pour <@${target.id}>.`);
     return true;
   }
 
