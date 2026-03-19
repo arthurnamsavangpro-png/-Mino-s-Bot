@@ -210,6 +210,16 @@ function parseSimpleButtonVisual(rawLabel, guild) {
   return { label: input.slice(0, 80), emoji: null };
 }
 
+function resolveNamedEmojiAliases(text, guild) {
+  const input = (text || "").toString();
+  if (!input) return input;
+  return input.replace(/:([a-zA-Z0-9_]{2,32}):/g, (full, name) => {
+    const found = guild?.emojis?.cache?.find((e) => e.name === name);
+    if (!found) return full;
+    return `<${found.animated ? "a" : ""}:${found.name}:${found.id}>`;
+  });
+}
+
 /**
  * Réponse éphémère robuste:
  * - si interaction a deferReply -> editReply
@@ -390,19 +400,23 @@ function buildPremiumAuthor(guild) {
 }
 
 function buildPremiumPanelEmbed({ guild, title, description, banner, bannerPosition }) {
+  const safeTitle = resolveNamedEmojiAliases(title || "🎫 Support Center", guild);
+  const safeDescription = resolveNamedEmojiAliases(
+    description ||
+      [
+        "Sélectionne une catégorie pour ouvrir un ticket.",
+        "",
+        "✅ **Process premium** : *Catégorie → Formulaire → Ticket créé*",
+        "⚠️ Merci d’être précis pour une réponse rapide.",
+      ].join("\n"),
+    guild
+  );
+
   const embed = new EmbedBuilder()
     .setColor(premiumColor())
     .setAuthor(buildPremiumAuthor(guild))
-    .setTitle(title || "🎫 Support Center")
-    .setDescription(
-      description ||
-        [
-          "Sélectionne une catégorie pour ouvrir un ticket.",
-          "",
-          "✅ **Process premium** : *Catégorie → Formulaire → Ticket créé*",
-          "⚠️ Merci d’être précis pour une réponse rapide.",
-        ].join("\n")
-    )
+    .setTitle(safeTitle)
+    .setDescription(safeDescription)
     .setFooter({ text: "Tickets Premium • Mino Bot" })
     .setTimestamp();
 
@@ -2436,12 +2450,16 @@ function createTicketsService({ pool, config }) {
 
   function buildSimplePanelFromDraft(guild, draft, forPublishPanelId = null) {
     const s = draft.simple || {};
+    const safeTitle = resolveNamedEmojiAliases((s.title || draft.title || "🎫 Ticket Center").slice(0, 256), guild);
+    const safeText = resolveNamedEmojiAliases((s.text || draft.description || "Clique pour ouvrir un ticket.").slice(0, 1500), guild);
+    const safeFooter = resolveNamedEmojiAliases((s.footer || "Tickets Premium • Mino Bot").slice(0, 2048), guild);
+
     const e = new EmbedBuilder()
       .setColor(premiumColor())
       .setAuthor(buildPremiumAuthor(guild))
-      .setTitle((s.title || draft.title || "🎫 Ticket Center").slice(0, 256))
-      .setDescription((s.text || draft.description || "Clique pour ouvrir un ticket.").slice(0, 1500))
-      .setFooter({ text: (s.footer || "Tickets Premium • Mino Bot").slice(0, 2048) })
+      .setTitle(safeTitle)
+      .setDescription(safeText)
+      .setFooter({ text: safeFooter })
       .setTimestamp();
 
     if (s.thumb && isValidHttpUrl(s.thumb)) e.setThumbnail(s.thumb);
