@@ -1073,7 +1073,14 @@ function createTicketsService({ pool, config }) {
   /* ---------------- Actions (claim/close/delete/transcript/feedback/stats) ---------------- */
 
   async function doClaim(interaction, ticketId) {
-    const release = await acquireTicketLock(ticketId);
+    let release = () => {};
+    try {
+      release = await acquireTicketLock(ticketId, 30000);
+    } catch {
+      await safeFollowUpEphemeral(interaction, { content: "⚠️ Action claim en attente, réessaie dans quelques secondes." });
+      return true;
+    }
+
     try {
       const ticket = await getTicket(ticketId);
       if (!ticket) {
