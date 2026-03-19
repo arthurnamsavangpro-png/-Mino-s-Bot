@@ -414,7 +414,6 @@ function buildPremiumPanelEmbed({ guild, title, description, banner, bannerPosit
 
   const embed = new EmbedBuilder()
     .setColor(premiumColor())
-    .setAuthor(buildPremiumAuthor(guild))
     .setTitle(safeTitle)
     .setDescription(safeDescription)
     .setFooter({ text: "Tickets Premium • Mino Bot" })
@@ -2455,7 +2454,6 @@ function createTicketsService({ pool, config }) {
 
     const e = new EmbedBuilder()
       .setColor(premiumColor())
-      .setAuthor(buildPremiumAuthor(guild))
       .setTitle(safeTitle)
       .setDescription(safeText)
       .setFooter({ text: safeFooter })
