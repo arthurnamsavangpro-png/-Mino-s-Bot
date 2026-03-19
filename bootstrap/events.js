@@ -18,6 +18,18 @@ function registerProcessSignals({ gracefulShutdown, logger }) {
 }
 
 function registerClientEvents({ client, services, logger }) {
+  const automod = services?.automod;
+  const tickets = services?.tickets;
+  const moderation = services?.moderation;
+  const invitations = services?.invitations;
+  const welcome = services?.welcome;
+  const serverstats = services?.serverstats;
+
+  async function callServiceHandler(service, method, ...args) {
+    if (!service || typeof service[method] !== 'function') return undefined;
+    return service[method](...args);
+  }
+
   const interactionRouter = createInteractionRouter(services);
   if (interactionRouter.duplicateCommands.length) {
     logger.warn({
@@ -80,9 +92,9 @@ function registerClientEvents({ client, services, logger }) {
 
   client.on('messageCreate', async (message) => {
     try {
-      if (await automod.handleMessage(message, client)) return;
-      if (await tickets.handleMessage?.(message, client)) return;
-      if (await moderation.handleMessage?.(message, client)) return;
+      if (await callServiceHandler(automod, 'handleMessage', message, client)) return;
+      if (await callServiceHandler(tickets, 'handleMessage', message, client)) return;
+      if (await callServiceHandler(moderation, 'handleMessage', message, client)) return;
     } catch (e) {
       logger.error({ module: 'events', event: 'messageCreate_fatal', error: e?.message || e });
     }
@@ -90,11 +102,11 @@ function registerClientEvents({ client, services, logger }) {
 
   client.on('guildMemberAdd', async (member) => {
     try {
-      await automod.handleGuildMemberAdd(member, client);
-      await moderation.handleGuildMemberAdd?.(member, client);
-      await invitations.handleGuildMemberAdd(member, client);
-      await welcome.handleGuildMemberAdd(member, client);
-      await serverstats.refreshGuildStats(member.guild);
+      await callServiceHandler(automod, 'handleGuildMemberAdd', member, client);
+      await callServiceHandler(moderation, 'handleGuildMemberAdd', member, client);
+      await callServiceHandler(invitations, 'handleGuildMemberAdd', member, client);
+      await callServiceHandler(welcome, 'handleGuildMemberAdd', member, client);
+      await callServiceHandler(serverstats, 'refreshGuildStats', member.guild);
     } catch (e) {
       logger.error({ module: 'events', event: 'guildMemberAdd_fatal', guildId: member?.guild?.id, userId: member?.id, error: e?.message || e });
     }
@@ -102,7 +114,7 @@ function registerClientEvents({ client, services, logger }) {
 
   client.on('guildMemberUpdate', async (oldMember, newMember) => {
     try {
-      await moderation.handleGuildMemberUpdate?.(oldMember, newMember, client);
+      await callServiceHandler(moderation, 'handleGuildMemberUpdate', oldMember, newMember, client);
     } catch (e) {
       logger.error({ module: 'events', event: 'guildMemberUpdate_fatal', guildId: newMember?.guild?.id, userId: newMember?.id, error: e?.message || e });
     }
@@ -110,8 +122,8 @@ function registerClientEvents({ client, services, logger }) {
 
   client.on('presenceUpdate', async (oldPresence, newPresence) => {
     try {
-      await moderation.handlePresenceUpdate?.(oldPresence, newPresence, client);
-      await serverstats.handlePresenceUpdate?.(newPresence);
+      await callServiceHandler(moderation, 'handlePresenceUpdate', oldPresence, newPresence, client);
+      await callServiceHandler(serverstats, 'handlePresenceUpdate', newPresence);
     } catch (e) {
       logger.error({ module: 'events', event: 'presenceUpdate_fatal', guildId: newPresence?.guild?.id, userId: newPresence?.userId, error: e?.message || e });
     }
@@ -119,7 +131,7 @@ function registerClientEvents({ client, services, logger }) {
 
   client.on('userUpdate', async (oldUser, newUser) => {
     try {
-      await moderation.handleUserUpdate?.(oldUser, newUser, client);
+      await callServiceHandler(moderation, 'handleUserUpdate', oldUser, newUser, client);
     } catch (e) {
       logger.error({ module: 'events', event: 'userUpdate_fatal', userId: newUser?.id, error: e?.message || e });
     }
@@ -127,7 +139,7 @@ function registerClientEvents({ client, services, logger }) {
 
   client.on('channelCreate', async (channel) => {
     try {
-      await automod.handleChannelCreate(channel, client);
+      await callServiceHandler(automod, 'handleChannelCreate', channel, client);
     } catch (e) {
       logger.error({ module: 'events', event: 'channelCreate_fatal', guildId: channel?.guild?.id, error: e?.message || e });
     }
@@ -135,7 +147,7 @@ function registerClientEvents({ client, services, logger }) {
 
   client.on('channelDelete', async (channel) => {
     try {
-      await automod.handleChannelDelete(channel, client);
+      await callServiceHandler(automod, 'handleChannelDelete', channel, client);
     } catch (e) {
       logger.error({ module: 'events', event: 'channelDelete_fatal', guildId: channel?.guild?.id, error: e?.message || e });
     }
@@ -143,7 +155,7 @@ function registerClientEvents({ client, services, logger }) {
 
   client.on('webhooksUpdate', async (channel) => {
     try {
-      await automod.handleWebhooksUpdate(channel, client);
+      await callServiceHandler(automod, 'handleWebhooksUpdate', channel, client);
     } catch (e) {
       logger.error({ module: 'events', event: 'webhooksUpdate_fatal', guildId: channel?.guild?.id, error: e?.message || e });
     }
@@ -151,8 +163,8 @@ function registerClientEvents({ client, services, logger }) {
 
   client.on('guildMemberRemove', async (member) => {
     try {
-      await invitations.handleGuildMemberRemove(member, client);
-      await serverstats.refreshGuildStats(member.guild);
+      await callServiceHandler(invitations, 'handleGuildMemberRemove', member, client);
+      await callServiceHandler(serverstats, 'refreshGuildStats', member.guild);
     } catch (e) {
       logger.error({ module: 'events', event: 'guildMemberRemove_fatal', guildId: member?.guild?.id, userId: member?.id, error: e?.message || e });
     }
@@ -160,7 +172,7 @@ function registerClientEvents({ client, services, logger }) {
 
   client.on('inviteCreate', async (invite) => {
     try {
-      await invitations.handleInviteCreate(invite, client);
+      await callServiceHandler(invitations, 'handleInviteCreate', invite, client);
     } catch (e) {
       logger.error({ module: 'events', event: 'inviteCreate_fatal', guildId: invite?.guild?.id, error: e?.message || e });
     }
@@ -168,7 +180,7 @@ function registerClientEvents({ client, services, logger }) {
 
   client.on('inviteDelete', async (invite) => {
     try {
-      await invitations.handleInviteDelete(invite, client);
+      await callServiceHandler(invitations, 'handleInviteDelete', invite, client);
     } catch (e) {
       logger.error({ module: 'events', event: 'inviteDelete_fatal', guildId: invite?.guild?.id, error: e?.message || e });
     }
