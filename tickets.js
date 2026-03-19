@@ -433,8 +433,10 @@ function buildTopBannerEmbed(banner) {
 
 /* ---------------- Ticket UI ---------------- */
 
-function buildTicketEmbed({ openerId, categoryLabel, ticketId, claimedBy, subject, details, guild }) {
-  const priseEnCharge = claimedBy ? `<@${claimedBy}>` : "Non pris en charge.";
+function buildTicketEmbed({ openerId, categoryLabel, ticketId, claimedBy, claimedHelpers, subject, details, guild }) {
+  const helpers = Array.isArray(claimedHelpers) ? claimedHelpers.filter((x) => typeof x === "string" && x) : [];
+  const mentions = Array.from(new Set([claimedBy, ...helpers].filter(Boolean))).map((id) => `<@${id}>`);
+  const priseEnCharge = mentions.length ? mentions.join(", ") : "Non pris en charge.";
 
   const e = new EmbedBuilder()
     .setColor(premiumColor())
@@ -653,6 +655,7 @@ function createTicketsService({ pool, config }) {
     try {
       await pool.query(`ALTER TABLE tickets ADD COLUMN IF NOT EXISTS subject TEXT;`);
       await pool.query(`ALTER TABLE tickets ADD COLUMN IF NOT EXISTS details TEXT;`);
+      await pool.query(`ALTER TABLE tickets ADD COLUMN IF NOT EXISTS claimed_helpers TEXT[];`);
     } catch {}
   }
 
@@ -986,6 +989,7 @@ function createTicketsService({ pool, config }) {
       categoryLabel: reason,
       ticketId,
       claimedBy: null,
+      claimedHelpers: [],
       subject,
       details,
       guild,
@@ -1008,14 +1012,14 @@ function createTicketsService({ pool, config }) {
   async function getTicket(ticketId) {
     const res = await pool
       .query(
-        `SELECT ticket_id, guild_id, channel_id, opener_id, status, claimed_by, category_label, created_at, closed_at,
+        `SELECT ticket_id, guild_id, channel_id, opener_id, status, claimed_by, claimed_helpers, category_label, created_at, closed_at,
                 subject, details
          FROM tickets WHERE ticket_id=$1 LIMIT 1`,
         [ticketId]
       )
       .catch(async () => {
         const r2 = await pool.query(
-          `SELECT ticket_id, guild_id, channel_id, opener_id, status, claimed_by, category_label, created_at, closed_at
+          `SELECT ticket_id, guild_id, channel_id, opener_id, status, claimed_by, claimed_helpers, category_label, created_at, closed_at
            FROM tickets WHERE ticket_id=$1 LIMIT 1`,
           [ticketId]
         );
@@ -1026,7 +1030,7 @@ function createTicketsService({ pool, config }) {
 
   async function getOpenTicketByChannel(channelId) {
     const res = await pool.query(
-      `SELECT ticket_id, guild_id, channel_id, opener_id, status, claimed_by, category_label, created_at, closed_at,
+      `SELECT ticket_id, guild_id, channel_id, opener_id, status, claimed_by, claimed_helpers, category_label, created_at, closed_at,
               subject, details
        FROM tickets
        WHERE channel_id=$1 AND status='open'
@@ -1159,7 +1163,7 @@ function createTicketsService({ pool, config }) {
           return true;
         }
         await safeFollowUpEphemeral(interaction, {
-          content: `⚠️ Ce ticket est déjà claim par <@${ticket.claimed_by}>. Utilise \`+add\` pour inviter quelqu'un.`,
+          content: `⚠️ Ce ticket est déjà claim par <@${ticket.claimed_by}>. Utilise \`+claim raison\` pour te rajouter dans la prise en charge.`,
         });
         return true;
       }
@@ -1175,6 +1179,7 @@ function createTicketsService({ pool, config }) {
         categoryLabel: finalTicket.category_label || "Support",
         ticketId,
         claimedBy: finalTicket.claimed_by || null,
+        claimedHelpers: finalTicket.claimed_helpers || [],
         subject: finalTicket.subject || null,
         details: finalTicket.details || null,
         guild: interaction.guild,
@@ -3452,37 +3457,41 @@ function createTicketsService({ pool, config }) {
       return true;
     }
 
-    const target = message.mentions.users.first();
-    if (!target) {
-      await message.reply("⚠️ Utilisation: `+claim @staff raison`");
-      return true;
-    }
-
+    const mentionTarget = message.mentions.users.first() || null;
+    const target = mentionTarget || message.author;
     const reason = parts.filter((p) => !/^<@!?\d+>$/.test(p)).join(" ").trim();
     if (!reason) {
-      await message.reply("⚠️ Tu dois préciser une raison. Exemple: `+claim @staff prise en charge facturation`");
+      await message.reply("⚠️ Tu dois préciser une raison. Exemple: `+claim prise en charge facturation`");
       return true;
     }
 
-    if (ticket.claimed_by) {
-      await message.reply(`⚠️ Ce ticket est déjà claim par <@${ticket.claimed_by}>.`);
-      return true;
-    }
-
-    const upd = await pool.query(
-      `UPDATE tickets SET claimed_by=$2
-       WHERE ticket_id=$1 AND status='open' AND claimed_by IS NULL
-       RETURNING claimed_by`,
-      [ticket.ticket_id, target.id]
-    );
-    if (upd.rowCount === 0) {
-      const latest = await getTicket(ticket.ticket_id);
-      await message.reply(
-        latest?.claimed_by
-          ? `⚠️ Déjà pris en charge par <@${latest.claimed_by}>.`
-          : "⚠️ Impossible de claim pour le moment (réessaie)."
+    if (!ticket.claimed_by) {
+      const upd = await pool.query(
+        `UPDATE tickets SET claimed_by=$2
+         WHERE ticket_id=$1 AND status='open' AND claimed_by IS NULL
+         RETURNING claimed_by`,
+        [ticket.ticket_id, target.id]
       );
-      return true;
+      if (upd.rowCount === 0) {
+        const latest = await getTicket(ticket.ticket_id);
+        await message.reply(
+          latest?.claimed_by
+            ? `⚠️ Déjà pris en charge par <@${latest.claimed_by}>.`
+            : "⚠️ Impossible de claim pour le moment (réessaie)."
+        );
+        return true;
+      }
+    } else if (ticket.claimed_by !== target.id) {
+      await pool.query(
+        `UPDATE tickets
+         SET claimed_helpers = CASE
+           WHEN claimed_helpers IS NULL THEN ARRAY[$2]::TEXT[]
+           WHEN NOT ($2 = ANY(claimed_helpers)) THEN claimed_helpers || $2
+           ELSE claimed_helpers
+         END
+         WHERE ticket_id=$1 AND status='open'`,
+        [ticket.ticket_id, target.id]
+      );
     }
 
     const finalTicket = await getTicket(ticket.ticket_id);
@@ -3494,6 +3503,7 @@ function createTicketsService({ pool, config }) {
           categoryLabel: finalTicket.category_label || "Support",
           ticketId: ticket.ticket_id,
           claimedBy: finalTicket.claimed_by || null,
+          claimedHelpers: finalTicket.claimed_helpers || [],
           subject: finalTicket.subject || null,
           details: finalTicket.details || null,
           guild: message.guild,
@@ -3503,6 +3513,11 @@ function createTicketsService({ pool, config }) {
       }
 
       await applyClaimExclusive(message.channel, settings, finalTicket.claimed_by || null);
+      if (finalTicket.claimed_by && finalTicket.claimed_by !== target.id) {
+        await message.channel.permissionOverwrites
+          .edit(target.id, { ViewChannel: true, SendMessages: true, ReadMessageHistory: true })
+          .catch(() => null);
+      }
       const uname = await fetchUsernameSafe(message.client, finalTicket.claimed_by);
       await tryRenameTicketChannel(
         message.channel,
@@ -3510,7 +3525,9 @@ function createTicketsService({ pool, config }) {
       );
     }
 
-    await message.reply(`✅ Ticket claim pour <@${target.id}> par <@${message.author.id}>.\n📝 Raison: ${reason}`);
+    await message.reply(
+      `✅ Prise en charge mise à jour par <@${message.author.id}> pour <@${target.id}>.\n📝 Raison: ${reason}`
+    );
     return true;
   }
 
