@@ -13,6 +13,7 @@ function serviceWith(...names) {
 function makeServices(overrides = {}) {
   return {
     ping: serviceWith('ping'),
+    startnewserver: serviceWith('startnewserver'),
     help: serviceWith('help'),
     vouches: serviceWith('vouch'),
     rankup: serviceWith('rankup'),
