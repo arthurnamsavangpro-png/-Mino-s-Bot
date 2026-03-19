@@ -74,7 +74,6 @@ function resolveStatusEmoji(guild, key) {
   if (!meta) return "";
   const found = guild?.emojis?.cache?.get?.(meta.id);
   if (found?.id && found?.name) return `<:${found.name}:${found.id}>`;
-  if (meta.name && meta.id) return `<:${meta.name}:${meta.id}>`;
   return meta.fallback;
 }
 
