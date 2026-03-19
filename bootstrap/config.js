@@ -44,6 +44,9 @@ function loadConfig(env = process.env) {
 
     MODLOG_CHANNEL_ID: env.MODLOG_CHANNEL_ID || null,
     MOD_STAFF_ROLE_ID: env.MOD_STAFF_ROLE_ID || null,
+
+    ENABLE_GUILD_PRESENCES: (env.ENABLE_GUILD_PRESENCES || 'true').toLowerCase() === 'true',
+    ENABLE_MESSAGE_CONTENT: (env.ENABLE_MESSAGE_CONTENT || 'true').toLowerCase() === 'true',
   };
 }
 

@@ -1,9 +1,10 @@
-const { Client, GatewayIntentBits, ActivityType } = require('discord.js');
+const { Client, ActivityType } = require('discord.js');
 
 const { loadConfig } = require('./bootstrap/config');
 const { createDbPool, runMigrations } = require('./bootstrap/db');
 const { registerCommands } = require('./bootstrap/commands');
 const { registerClientEvents, registerProcessSignals } = require('./bootstrap/events');
+const { buildIntents } = require('./bootstrap/intents');
 const { createLogger } = require('./logger');
 
 const { createVouchesService } = require('./vouches');
@@ -35,13 +36,7 @@ try {
 const pool = createDbPool(config);
 
 const client = new Client({
-  intents: [
-    GatewayIntentBits.Guilds,
-    GatewayIntentBits.GuildMembers,
-    GatewayIntentBits.GuildPresences,
-    GatewayIntentBits.GuildMessages,
-    GatewayIntentBits.MessageContent,
-  ],
+  intents: buildIntents(config),
 });
 
 const rankup = createRankupService({ pool, config });
