@@ -22,6 +22,7 @@ const { createWelcomeService } = require('./welcome');
 const { createServerStatsService } = require('./serverstats');
 const { createWorlService } = require('./worl');
 const { createHelpService } = require('./help');
+const { createPingService } = require('./ping');
 
 const logger = createLogger();
 
@@ -39,11 +40,12 @@ const client = new Client({
   intents: buildIntents(config),
 });
 
+const ping = createPingService();
 const rankup = createRankupService({ pool, config });
 const vouches = createVouchesService({ pool, config, rankup });
 const modrank = createModrankService({ pool, config });
 const sendMessage = createSendMessageService();
-const tickets = createTicketsService({ pool, config });
+const tickets = createTicketsService({ pool, config, logger });
 const giveaways = createGiveawayService({ pool, config });
 const moderation = createModerationService({ pool, config });
 const automod = createAutomodService({ pool, config });
@@ -56,6 +58,7 @@ const worl = createWorlService({ pool, config });
 
 const help = createHelpService({
   services: {
+    ping,
     vouches,
     rankup,
     modrank,
@@ -74,6 +77,7 @@ const help = createHelpService({
 });
 
 const services = {
+  ping,
   help,
   vouches,
   rankup,
@@ -183,12 +187,26 @@ client.once('clientReady', async () => {
     await invitations.primeCache(client);
 
     for (const g of client.guilds.cache.values()) {
-      await serverstats.refreshGuildStats(g).catch(() => {});
+      await serverstats.refreshGuildStats(g).catch((error) => {
+        logger.warn({
+          module: 'serverstats',
+          event: 'initial_refresh_failed',
+          guildId: g.id,
+          error: error?.message || error,
+        });
+      });
     }
     serverstats.startScheduler(client);
 
     for (const g of client.guilds.cache.values()) {
-      await vouches.updateVouchboardMessage(client, g.id).catch(() => {});
+      await vouches.updateVouchboardMessage(client, g.id).catch((error) => {
+        logger.warn({
+          module: 'vouches',
+          event: 'initial_vouchboard_update_failed',
+          guildId: g.id,
+          error: error?.message || error,
+        });
+      });
     }
     vouches.startGlobalVouchboardUpdater(client);
 
