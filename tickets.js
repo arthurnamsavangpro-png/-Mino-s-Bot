@@ -435,7 +435,6 @@ function buildTicketEmbed({ openerId, categoryLabel, ticketId, claimedBy, subjec
 
   const e = new EmbedBuilder()
     .setColor(premiumColor())
-    .setAuthor(buildPremiumAuthor(guild))
     .setTitle("🎫 Ticket créé")
     .setDescription(
       [
