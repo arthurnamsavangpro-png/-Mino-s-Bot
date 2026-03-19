@@ -183,6 +183,24 @@ function createStartNewServerService({ pool }) {
 
     await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
+    // Évite l'auto-sanction pendant la création massive de salons.
+    await pool
+      .query(
+        `INSERT INTO automod_settings (guild_id, settings_json, updated_at)
+         VALUES ($1, $2::jsonb, NOW())
+         ON CONFLICT (guild_id) DO UPDATE
+           SET settings_json = jsonb_set(
+             jsonb_set(COALESCE(automod_settings.settings_json, '{}'::jsonb), '{enabled}', 'false'::jsonb, true),
+             '{admin_raid,enabled}',
+             'false'::jsonb,
+             true
+           ),
+               updated_at = NOW()`,
+        [guildId, JSON.stringify({ enabled: false, admin_raid: { enabled: false } })]
+      )
+      .then(() => report.ok.push('AutoMod mis en pause temporaire pendant le setup.'))
+      .catch(() => report.warnings.push('Impossible de mettre AutoMod en pause avant setup.'));
+
     let setupCategory = guild.channels.cache.find(
       (ch) => ch.type === ChannelType.GuildCategory && ch.name === '🤖・mino-setup'
     );
@@ -300,10 +318,17 @@ function createStartNewServerService({ pool }) {
             anti_join: { enabled: true, action: 'timeout' },
             anti_mention: { enabled: true, action: 'timeout', block_everyone: true },
             anti_link: { enabled: true, action: 'delete', block_invites: true },
+            admin_raid: {
+              enabled: false,
+              action: 'log',
+              max_channels_create_10s: 8,
+              max_channels_delete_10s: 5,
+              max_webhooks_30s: 5,
+            },
           }),
         ]
       )
-      .then(() => report.ok.push('AutoMod activé en mode soft.'))
+      .then(() => report.ok.push('AutoMod activé en mode soft (admin-raid laissé OFF pour éviter l’auto-kick).'))
       .catch(() => report.warnings.push('Configuration DB AutoMod échouée.'));
 
     let statsCategory = guild.channels.cache.find(
