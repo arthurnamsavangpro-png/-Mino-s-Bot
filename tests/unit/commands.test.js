@@ -47,3 +47,26 @@ test('buildCommandsPayload detects duplicate command names', () => {
   const { duplicates } = buildCommandsPayload(services);
   assert.deepEqual(duplicates, ['shared']);
 });
+
+test('buildCommandsPayload ignores missing services and missing commands arrays', () => {
+  const { commands, duplicates } = buildCommandsPayload({
+    ping: serviceWith('ping'),
+    help: { commands: null },
+    // autres services absents volontairement
+  });
+
+  assert.deepEqual(duplicates, []);
+  assert.deepEqual(commands.map((c) => c.name), ['ping']);
+});
+
+test('buildCommandsPayload throws for invalid command payload', () => {
+  assert.throws(
+    () =>
+      buildCommandsPayload({
+        ping: {
+          commands: [{ toJSON: () => ({}) }],
+        },
+      }),
+    /Commande invalide/
+  );
+});
