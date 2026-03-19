@@ -1090,7 +1090,7 @@ function createModerationService({ pool, config }) {
           value: `#${caseId}`,
           inline: true,
         });
-        await logMsg.edit({ embeds: [updated] }).catch(() => {});
+        await logMsg.edit({ embeds: [updated] }).catch((error) => { console.warn(`[safe] ${error?.message || error}`); });
       }
 
       await interaction.editReply(`✅ Ban effectué. Case **#${caseId}** enregistré.`);
@@ -1189,7 +1189,7 @@ function createModerationService({ pool, config }) {
         value: `#${caseId}`,
         inline: true,
       });
-      await logMsg.edit({ embeds: [updated] }).catch(() => {});
+      await logMsg.edit({ embeds: [updated] }).catch((error) => { console.warn(`[safe] ${error?.message || error}`); });
     }
 
     await interaction.editReply(`✅ Déban effectué. Case **#${caseId}**.`);
@@ -1541,7 +1541,7 @@ function createModerationService({ pool, config }) {
             });
 
             const ack = await message.channel.send(`✅ Purge terminée. ${deletedCount} message(s) supprimé(s).`);
-            setTimeout(() => ack.delete().catch(() => {}), 4000);
+            setTimeout(() => ack.delete().catch((error) => { console.warn(`[safe] ${error?.message || error}`); }), 4000);
             return true;
           } catch (e) {
             console.error('prefix +purge error:', e);
@@ -1764,7 +1764,7 @@ function createModerationService({ pool, config }) {
           value: `#${caseId}`,
           inline: true,
         });
-        await logMsg.edit({ embeds: [updated] }).catch(() => {});
+        await logMsg.edit({ embeds: [updated] }).catch((error) => { console.warn(`[safe] ${error?.message || error}`); });
       }
 
       await interaction.editReply(
@@ -1860,7 +1860,7 @@ function createModerationService({ pool, config }) {
             value: `#${caseId}`,
             inline: true,
           });
-          await logMsg.edit({ embeds: [updated] }).catch(() => {});
+          await logMsg.edit({ embeds: [updated] }).catch((error) => { console.warn(`[safe] ${error?.message || error}`); });
         }
 
         await interaction.editReply(`✅ Warn ajouté. Case **#${caseId}**.`);
@@ -2058,7 +2058,7 @@ function createModerationService({ pool, config }) {
           value: `#${caseId}`,
           inline: true,
         });
-        await logMsg.edit({ embeds: [updated] }).catch(() => {});
+        await logMsg.edit({ embeds: [updated] }).catch((error) => { console.warn(`[safe] ${error?.message || error}`); });
       }
 
       await interaction.editReply(`✅ Purge terminée. ${deletedCount} message(s) supprimé(s). Case **#${caseId}**.`);
@@ -2394,13 +2394,13 @@ function createModerationService({ pool, config }) {
         await interaction.reply({
           content: '⚠️ Erreur pendant la mise à jour du panneau auto-rôles.',
           flags: MessageFlags.Ephemeral,
-        }).catch(() => {});
+        }).catch((error) => { console.warn(`[safe] ${error?.message || error}`); });
       } else {
         await interaction.editReply({
           content: '⚠️ Erreur pendant la mise à jour du panneau auto-rôles.',
           components: [],
           embeds: [],
-        }).catch(() => {});
+        }).catch((error) => { console.warn(`[safe] ${error?.message || error}`); });
       }
       return true;
     }
