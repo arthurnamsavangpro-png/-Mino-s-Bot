@@ -1,4 +1,14 @@
 function loadConfig(env = process.env) {
+  function getNumber(name, fallback) {
+    const raw = env[name];
+    if (raw === undefined || raw === null || raw === '') return fallback;
+    const value = Number(raw);
+    if (!Number.isFinite(value)) {
+      throw new Error(`Variable ${name} invalide: attendu un nombre, reçu "${raw}"`);
+    }
+    return value;
+  }
+
   const TOKEN = env.DISCORD_TOKEN;
   const CLIENT_ID = env.CLIENT_ID;
   const GUILD_ID = env.GUILD_ID || null;
@@ -26,7 +36,7 @@ function loadConfig(env = process.env) {
     NODE_ENV: env.NODE_ENV,
 
     VOUCH_CHANNEL_ID: env.VOUCH_CHANNEL_ID || null,
-    VOUCHBOARD_REFRESH_MS: Number(env.VOUCHBOARD_REFRESH_MS || 60000),
+    VOUCHBOARD_REFRESH_MS: getNumber('VOUCHBOARD_REFRESH_MS', 60000),
 
     RANKUP_STACK: (env.RANKUP_STACK || 'false').toLowerCase() === 'true',
     RANKUP_LOG_CHANNEL_ID: env.RANKUP_LOG_CHANNEL_ID || null,
@@ -35,12 +45,12 @@ function loadConfig(env = process.env) {
     TICKET_STAFF_ROLE_ID: env.TICKET_STAFF_ROLE_ID || null,
     ADMIN_FEEDBACK_CHANNEL_ID: env.ADMIN_FEEDBACK_CHANNEL_ID || null,
     TICKET_TRANSCRIPT_CHANNEL_ID: env.TICKET_TRANSCRIPT_CHANNEL_ID || null,
-    TICKET_MAX_OPEN_PER_USER: Number(env.TICKET_MAX_OPEN_PER_USER || 1),
-    TICKET_COOLDOWN_SECONDS: Number(env.TICKET_COOLDOWN_SECONDS || 600),
+    TICKET_MAX_OPEN_PER_USER: getNumber('TICKET_MAX_OPEN_PER_USER', 1),
+    TICKET_COOLDOWN_SECONDS: getNumber('TICKET_COOLDOWN_SECONDS', 600),
     TICKET_CLAIM_EXCLUSIVE: (env.TICKET_CLAIM_EXCLUSIVE || 'false').toLowerCase() === 'true',
     TICKET_DELETE_ON_CLOSE: (env.TICKET_DELETE_ON_CLOSE || 'false').toLowerCase() === 'true',
 
-    GIVEAWAY_SWEEP_MS: Number(env.GIVEAWAY_SWEEP_MS || 15000),
+    GIVEAWAY_SWEEP_MS: getNumber('GIVEAWAY_SWEEP_MS', 15000),
 
     MODLOG_CHANNEL_ID: env.MODLOG_CHANNEL_ID || null,
     MOD_STAFF_ROLE_ID: env.MOD_STAFF_ROLE_ID || null,

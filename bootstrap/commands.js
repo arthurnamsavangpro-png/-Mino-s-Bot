@@ -1,6 +1,6 @@
 const { REST, Routes, SlashCommandBuilder } = require('discord.js');
 
-async function registerCommands({ token, clientId, guildId, commandsScope, services, logger }) {
+function buildCommandsPayload(services) {
   const commands = [
     new SlashCommandBuilder().setName('ping').setDescription('Répond pong + latence'),
     ...services.help.commands,
@@ -19,6 +19,22 @@ async function registerCommands({ token, clientId, guildId, commandsScope, servi
     ...services.serverstats.commands,
     ...services.worl.commands,
   ].map((c) => c.toJSON());
+
+  const seen = new Set();
+  const duplicates = new Set();
+  for (const command of commands) {
+    if (seen.has(command.name)) duplicates.add(command.name);
+    seen.add(command.name);
+  }
+
+  return { commands, duplicates: [...duplicates].sort() };
+}
+
+async function registerCommands({ token, clientId, guildId, commandsScope, services, logger }) {
+  const { commands, duplicates } = buildCommandsPayload(services);
+  if (duplicates.length) {
+    throw new Error(`Commandes slash dupliquées: ${duplicates.join(', ')}`);
+  }
 
   const rest = new REST({ version: '10' }).setToken(token);
 
@@ -46,4 +62,4 @@ async function registerCommands({ token, clientId, guildId, commandsScope, servi
   return putGlobal();
 }
 
-module.exports = { registerCommands };
+module.exports = { registerCommands, buildCommandsPayload };
