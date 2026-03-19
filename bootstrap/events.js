@@ -1,4 +1,5 @@
 const { MessageFlags } = require('discord.js');
+const { createInteractionRouter } = require('./interaction-router');
 
 function registerProcessSignals({ gracefulShutdown, logger }) {
   process.on('SIGINT', () => {
@@ -34,6 +35,7 @@ function registerClientEvents({ client, services, logger }) {
     rankup,
     modrank,
   } = services;
+  const interactionRouter = createInteractionRouter(services);
 
   client.on('interactionCreate', async (interaction) => {
     const isSlash = interaction.isChatInputCommand();
@@ -52,18 +54,7 @@ function registerClientEvents({ client, services, logger }) {
     logger.info({ ...baseContext, phase: 'start' });
 
     try {
-      if (await help.handleInteraction(interaction, client)) return;
-      if (await tickets.handleInteraction(interaction, client)) return;
-      if (await sendMessage.handleInteraction(interaction)) return;
-      if (await giveaways.handleInteraction(interaction, client)) return;
-      if (await automod.handleInteraction(interaction, client)) return;
-      if (await updates.handleInteraction(interaction, client)) return;
-      if (await absence.handleInteraction(interaction, client)) return;
-      if (await invitations.handleInteraction(interaction, client)) return;
-      if (await welcome.handleInteraction(interaction, client)) return;
-      if (await serverstats.handleInteraction(interaction, client)) return;
-      if (await worl.handleInteraction(interaction, client)) return;
-      if (await moderation.handleInteraction(interaction, client)) return;
+      if (await interactionRouter.dispatchInteraction(interaction, client)) return;
 
       if (!isSlash) return;
 
@@ -73,10 +64,6 @@ function registerClientEvents({ client, services, logger }) {
         await interaction.editReply(`pong (latence: ${latency}ms)`);
         return;
       }
-
-      if (await vouches.handleInteraction(interaction, client)) return;
-      if (await rankup.handleInteraction(interaction)) return;
-      if (await modrank.handleInteraction(interaction, client)) return;
     } catch (e) {
       logger.error({ ...baseContext, event: 'interaction_error', error: e?.message || e });
       if (interaction?.isRepliable?.()) {
@@ -86,9 +73,21 @@ function registerClientEvents({ client, services, logger }) {
               content: '⚠️ Erreur interne (voir logs).',
               flags: MessageFlags.Ephemeral,
             })
-            .catch(() => {});
+            .catch((replyError) => {
+              logger.warn({
+                ...baseContext,
+                event: 'interaction_error_reply_failed',
+                error: replyError?.message || replyError,
+              });
+            });
         } else if (interaction.deferred && !interaction.replied) {
-          await interaction.editReply('⚠️ Erreur interne (voir logs).').catch(() => {});
+          await interaction.editReply('⚠️ Erreur interne (voir logs).').catch((editError) => {
+            logger.warn({
+              ...baseContext,
+              event: 'interaction_error_edit_failed',
+              error: editError?.message || editError,
+            });
+          });
         }
       }
     } finally {
