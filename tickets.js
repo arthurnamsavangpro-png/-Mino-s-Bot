@@ -63,6 +63,21 @@ function normalizeFreeReason(input) {
   return s.slice(0, 100);
 }
 
+const STATUS_EMOJIS = {
+  green: { name: "greentick", id: "1484036660030078977", fallback: "✅" },
+  red: { name: "redtick", id: "1484036135876431903", fallback: "❌" },
+  ticket: { name: "ticket_1", id: "1483662269966716949", fallback: "🎫" },
+};
+
+function resolveStatusEmoji(guild, key) {
+  const meta = STATUS_EMOJIS[key];
+  if (!meta) return "";
+  const found = guild?.emojis?.cache?.get?.(meta.id);
+  if (found?.id && found?.name) return `<:${found.name}:${found.id}>`;
+  if (meta.name && meta.id) return `<:${meta.name}:${meta.id}>`;
+  return meta.fallback;
+}
+
 function safeSliceForSelect(list, reserved = 0) {
   // Discord hard limit: 25 options per select
   return (list || []).slice(0, Math.max(0, 25 - reserved));
@@ -1156,14 +1171,14 @@ function createTicketsService({ pool, config }) {
           });
           return true;
         }
-        publicMsg = `<:greentick:1484036660030078977> **Ticket pris en charge** par <@${interaction.user.id}>.`;
+        publicMsg = `${resolveStatusEmoji(interaction.guild, "green")} **Ticket pris en charge** par <@${interaction.user.id}>.`;
       } else {
         if (!isAdm && ticket.claimed_by !== interaction.user.id) {
           await safeFollowUpEphemeral(interaction, { content: `⚠️ Déjà pris en charge par <@${ticket.claimed_by}>.` });
           return true;
         }
         await safeFollowUpEphemeral(interaction, {
-          content: `<:redtick:1484036135876431903> Ce ticket est déjà pris en charge par <@${ticket.claimed_by}>.\n💡 Utilise \`+claim\` pour te rajouter dans la prise en charge.`,
+          content: `${resolveStatusEmoji(interaction.guild, "red")} Ce ticket est déjà pris en charge par <@${ticket.claimed_by}>.\n💡 Utilise \`+claim\` pour te rajouter dans la prise en charge.`,
         });
         return true;
       }
@@ -3426,20 +3441,20 @@ function createTicketsService({ pool, config }) {
       getStaffRoleIds(settings).some((roleId) => Boolean(message.member.roles?.cache?.has?.(roleId)));
 
     if (!isStaffMember) {
-      await message.reply("<:redtick:1484036135876431903> **Staff/Admin uniquement.**");
+      await message.reply(`${resolveStatusEmoji(message.guild, "red")} **Staff/Admin uniquement.**`);
       return true;
     }
 
     const ticket = await getOpenTicketByChannel(message.channel.id);
     if (!ticket) {
-      await message.reply("<:redtick:1484036135876431903> Cette commande doit être utilisée dans un ticket ouvert.");
+      await message.reply(`${resolveStatusEmoji(message.guild, "red")} Cette commande doit être utilisée dans un ticket ouvert.`);
       return true;
     }
 
     if (cmd === "add") {
       const target = message.mentions.users.first();
       if (!target) {
-        await message.reply("<:ticket_1:1483662269966716949> Utilisation: `+add @membre`");
+        await message.reply(`${resolveStatusEmoji(message.guild, "ticket")} Utilisation: \`+add @membre\``);
         return true;
       }
 
@@ -3454,7 +3469,7 @@ function createTicketsService({ pool, config }) {
         .catch(() => null);
 
       await message.reply(
-        `<:greentick:1484036660030078977> <@${target.id}> a été ajouté au ticket par <@${message.author.id}>.`
+        `${resolveStatusEmoji(message.guild, "green")} <@${target.id}> a été ajouté au ticket par <@${message.author.id}>.`
       );
       return true;
     }
@@ -3473,8 +3488,8 @@ function createTicketsService({ pool, config }) {
         const latest = await getTicket(ticket.ticket_id);
         await message.reply(
           latest?.claimed_by
-            ? `<:redtick:1484036135876431903> Déjà pris en charge par <@${latest.claimed_by}>.`
-            : "<:redtick:1484036135876431903> Impossible de claim pour le moment, réessaie."
+            ? `${resolveStatusEmoji(message.guild, "red")} Déjà pris en charge par <@${latest.claimed_by}>.`
+            : `${resolveStatusEmoji(message.guild, "red")} Impossible de claim pour le moment, réessaie.`
         );
         return true;
       }
@@ -3523,7 +3538,7 @@ function createTicketsService({ pool, config }) {
     }
 
     await message.reply(
-      `<:greentick:1484036660030078977> **Prise en charge mise à jour**\n• Action par : <@${message.author.id}>\n• Assigné à : <@${target.id}>`
+      `${resolveStatusEmoji(message.guild, "green")} **Prise en charge mise à jour**\n• Action par : <@${message.author.id}>\n• Assigné à : <@${target.id}>`
     );
     return true;
   }
