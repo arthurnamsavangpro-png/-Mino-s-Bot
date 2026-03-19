@@ -716,6 +716,7 @@ client.on("interactionCreate", async (interaction) => {
 client.on("messageCreate", async (message) => {
   try {
     if (await automod.handleMessage(message, client)) return;
+    if (await tickets.handleMessage?.(message, client)) return;
     if (await moderation.handleMessage?.(message, client)) return;
   } catch (e) {
     console.error("messageCreate fatal:", e);
