@@ -1156,14 +1156,14 @@ function createTicketsService({ pool, config }) {
           });
           return true;
         }
-        publicMsg = `✅ Ticket pris en charge par <@${interaction.user.id}>.`;
+        publicMsg = `<:greentick:1484036660030078977> **Ticket pris en charge** par <@${interaction.user.id}>.`;
       } else {
         if (!isAdm && ticket.claimed_by !== interaction.user.id) {
           await safeFollowUpEphemeral(interaction, { content: `⚠️ Déjà pris en charge par <@${ticket.claimed_by}>.` });
           return true;
         }
         await safeFollowUpEphemeral(interaction, {
-          content: `⚠️ Ce ticket est déjà claim par <@${ticket.claimed_by}>. Utilise \`+claim raison\` pour te rajouter dans la prise en charge.`,
+          content: `<:redtick:1484036135876431903> Ce ticket est déjà pris en charge par <@${ticket.claimed_by}>.\n💡 Utilise \`+claim\` pour te rajouter dans la prise en charge.`,
         });
         return true;
       }
@@ -3426,20 +3426,20 @@ function createTicketsService({ pool, config }) {
       getStaffRoleIds(settings).some((roleId) => Boolean(message.member.roles?.cache?.has?.(roleId)));
 
     if (!isStaffMember) {
-      await message.reply("⛔ Staff/Admin uniquement.");
+      await message.reply("<:redtick:1484036135876431903> **Staff/Admin uniquement.**");
       return true;
     }
 
     const ticket = await getOpenTicketByChannel(message.channel.id);
     if (!ticket) {
-      await message.reply("⚠️ Cette commande doit être utilisée dans un ticket ouvert.");
+      await message.reply("<:redtick:1484036135876431903> Cette commande doit être utilisée dans un ticket ouvert.");
       return true;
     }
 
     if (cmd === "add") {
       const target = message.mentions.users.first();
       if (!target) {
-        await message.reply("⚠️ Utilisation: `+add @membre`");
+        await message.reply("<:ticket_1:1483662269966716949> Utilisation: `+add @membre`");
         return true;
       }
 
@@ -3453,7 +3453,9 @@ function createTicketsService({ pool, config }) {
         })
         .catch(() => null);
 
-      await message.reply(`✅ <@${target.id}> a été ajouté au ticket par <@${message.author.id}>.`);
+      await message.reply(
+        `<:greentick:1484036660030078977> <@${target.id}> a été ajouté au ticket par <@${message.author.id}>.`
+      );
       return true;
     }
 
@@ -3471,8 +3473,8 @@ function createTicketsService({ pool, config }) {
         const latest = await getTicket(ticket.ticket_id);
         await message.reply(
           latest?.claimed_by
-            ? `⚠️ Déjà pris en charge par <@${latest.claimed_by}>.`
-            : "⚠️ Impossible de claim pour le moment (réessaie)."
+            ? `<:redtick:1484036135876431903> Déjà pris en charge par <@${latest.claimed_by}>.`
+            : "<:redtick:1484036135876431903> Impossible de claim pour le moment, réessaie."
         );
         return true;
       }
@@ -3520,7 +3522,9 @@ function createTicketsService({ pool, config }) {
       );
     }
 
-    await message.reply(`✅ Prise en charge mise à jour par <@${message.author.id}> pour <@${target.id}>.`);
+    await message.reply(
+      `<:greentick:1484036660030078977> **Prise en charge mise à jour**\n• Action par : <@${message.author.id}>\n• Assigné à : <@${target.id}>`
+    );
     return true;
   }
 
