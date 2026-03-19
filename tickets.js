@@ -610,7 +610,9 @@ function createTicketsService({ pool, config }) {
       await pool.query(`ALTER TABLE tickets ADD COLUMN IF NOT EXISTS subject TEXT;`);
       await pool.query(`ALTER TABLE tickets ADD COLUMN IF NOT EXISTS details TEXT;`);
       await pool.query(`ALTER TABLE tickets ADD COLUMN IF NOT EXISTS claimed_helpers TEXT[];`);
-    } catch {}
+    } catch (error) {
+      console.warn(`[tickets] ensureExtraColumns failed: ${error?.message || error}`);
+    }
   }
 
   let ensuredSettingsCols = false;
@@ -619,7 +621,9 @@ function createTicketsService({ pool, config }) {
     ensuredSettingsCols = true;
     try {
       await pool.query(`ALTER TABLE ticket_settings ADD COLUMN IF NOT EXISTS staff_role_ids TEXT[];`);
-    } catch {}
+    } catch (error) {
+      console.warn(`[tickets] ensureSettingsColumns failed: ${error?.message || error}`);
+    }
   }
 
   function uniqueRoleIds(list) {

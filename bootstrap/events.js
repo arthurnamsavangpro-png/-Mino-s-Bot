@@ -86,9 +86,21 @@ function registerClientEvents({ client, services, logger }) {
               content: '⚠️ Erreur interne (voir logs).',
               flags: MessageFlags.Ephemeral,
             })
-            .catch(() => {});
+            .catch((replyError) => {
+              logger.warn({
+                ...baseContext,
+                event: 'interaction_error_reply_failed',
+                error: replyError?.message || replyError,
+              });
+            });
         } else if (interaction.deferred && !interaction.replied) {
-          await interaction.editReply('⚠️ Erreur interne (voir logs).').catch(() => {});
+          await interaction.editReply('⚠️ Erreur interne (voir logs).').catch((editError) => {
+            logger.warn({
+              ...baseContext,
+              event: 'interaction_error_edit_failed',
+              error: editError?.message || editError,
+            });
+          });
         }
       }
     } finally {
