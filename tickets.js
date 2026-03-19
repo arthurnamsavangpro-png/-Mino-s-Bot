@@ -629,6 +629,7 @@ function createTicketsService({ pool, config }) {
   const DEFAULT_SETTINGS = {
     category_id: config.TICKET_CATEGORY_ID || null,
     staff_role_id: config.TICKET_STAFF_ROLE_ID || null,
+    staff_role_ids: config.TICKET_STAFF_ROLE_ID ? [config.TICKET_STAFF_ROLE_ID] : [],
     admin_feedback_channel_id: config.ADMIN_FEEDBACK_CHANNEL_ID || null,
     transcript_channel_id: config.TICKET_TRANSCRIPT_CHANNEL_ID || null,
     max_open_per_user: Number(config.TICKET_MAX_OPEN_PER_USER || 1),
@@ -647,9 +648,36 @@ function createTicketsService({ pool, config }) {
     } catch {}
   }
 
+  let ensuredSettingsCols = false;
+  async function ensureSettingsColumns() {
+    if (ensuredSettingsCols) return;
+    ensuredSettingsCols = true;
+    try {
+      await pool.query(`ALTER TABLE ticket_settings ADD COLUMN IF NOT EXISTS staff_role_ids TEXT[];`);
+    } catch {}
+  }
+
+  function uniqueRoleIds(list) {
+    return Array.from(new Set((list || []).filter((id) => typeof id === "string" && /^\d{17,20}$/.test(id))));
+  }
+
+  function getStaffRoleIds(settings) {
+    const fromArray = uniqueRoleIds(settings?.staff_role_ids);
+    if (fromArray.length) return fromArray;
+    if (settings?.staff_role_id && /^\d{17,20}$/.test(settings.staff_role_id)) return [settings.staff_role_id];
+    return [];
+  }
+
+  function formatStaffRolesMention(settings) {
+    const ids = getStaffRoleIds(settings);
+    if (!ids.length) return "—";
+    return ids.map((id) => `<@&${id}>`).join(", ");
+  }
+
   async function getSettings(guildId) {
+    await ensureSettingsColumns();
     const res = await pool.query(
-      `SELECT category_id, staff_role_id, admin_feedback_channel_id, transcript_channel_id,
+      `SELECT category_id, staff_role_id, staff_role_ids, admin_feedback_channel_id, transcript_channel_id,
               max_open_per_user, cooldown_seconds, claim_exclusive, delete_on_close
        FROM ticket_settings WHERE guild_id=$1 LIMIT 1`,
       [guildId]
@@ -663,21 +691,28 @@ function createTicketsService({ pool, config }) {
 
     merged.max_open_per_user = clamp(Number(merged.max_open_per_user || 1), 1, 5);
     merged.cooldown_seconds = clamp(Number(merged.cooldown_seconds || 0), 0, 86400);
+    merged.staff_role_ids = getStaffRoleIds(merged);
+    merged.staff_role_id = merged.staff_role_ids[0] || null;
     return merged;
   }
 
   async function upsertSettings(guildId, patch) {
+    await ensureSettingsColumns();
     const cur = await getSettings(guildId);
     const next = { ...cur, ...patch };
 
+    next.staff_role_ids = getStaffRoleIds(next);
+    next.staff_role_id = next.staff_role_ids[0] || null;
+
     await pool.query(
       `INSERT INTO ticket_settings
-        (guild_id, category_id, staff_role_id, admin_feedback_channel_id, transcript_channel_id,
+        (guild_id, category_id, staff_role_id, staff_role_ids, admin_feedback_channel_id, transcript_channel_id,
          max_open_per_user, cooldown_seconds, claim_exclusive, delete_on_close)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
        ON CONFLICT (guild_id) DO UPDATE SET
          category_id=EXCLUDED.category_id,
          staff_role_id=EXCLUDED.staff_role_id,
+         staff_role_ids=EXCLUDED.staff_role_ids,
          admin_feedback_channel_id=EXCLUDED.admin_feedback_channel_id,
          transcript_channel_id=EXCLUDED.transcript_channel_id,
          max_open_per_user=EXCLUDED.max_open_per_user,
@@ -689,6 +724,7 @@ function createTicketsService({ pool, config }) {
         guildId,
         next.category_id,
         next.staff_role_id,
+        next.staff_role_ids,
         next.admin_feedback_channel_id,
         next.transcript_channel_id,
         next.max_open_per_user,
@@ -703,8 +739,9 @@ function createTicketsService({ pool, config }) {
 
   function isStaff(interaction, settings) {
     if (isAdmin(interaction)) return true;
-    if (!settings.staff_role_id) return false;
-    return Boolean(interaction.member?.roles?.cache?.has?.(settings.staff_role_id));
+    const roleIds = getStaffRoleIds(settings);
+    if (!roleIds.length) return false;
+    return roleIds.some((roleId) => Boolean(interaction.member?.roles?.cache?.has?.(roleId)));
   }
 
   /* ---------------- Panel creation (LEGACY) ---------------- */
@@ -877,9 +914,9 @@ function createTicketsService({ pool, config }) {
       },
     ];
 
-    if (settings.staff_role_id) {
+    for (const staffRoleId of getStaffRoleIds(settings)) {
       overwrites.push({
-        id: settings.staff_role_id,
+        id: staffRoleId,
         allow: [
           PermissionsBitField.Flags.ViewChannel,
           PermissionsBitField.Flags.SendMessages,
@@ -1015,15 +1052,21 @@ function createTicketsService({ pool, config }) {
   }
 
   async function applyClaimExclusive(channel, settings, finalClaimedBy) {
-    if (!settings.claim_exclusive || !settings.staff_role_id || !channel) return;
+    if (!settings.claim_exclusive || !channel) return;
+    const staffRoleIds = getStaffRoleIds(settings);
+    if (!staffRoleIds.length) return;
 
     if (finalClaimedBy) {
-      await channel.permissionOverwrites.edit(settings.staff_role_id, { SendMessages: false }).catch(() => {});
+      for (const roleId of staffRoleIds) {
+        await channel.permissionOverwrites.edit(roleId, { SendMessages: false }).catch(() => {});
+      }
       await channel.permissionOverwrites
         .edit(finalClaimedBy, { SendMessages: true, ViewChannel: true })
         .catch(() => {});
     } else {
-      await channel.permissionOverwrites.edit(settings.staff_role_id, { SendMessages: true }).catch(() => {});
+      for (const roleId of staffRoleIds) {
+        await channel.permissionOverwrites.edit(roleId, { SendMessages: true }).catch(() => {});
+      }
     }
   }
 
@@ -1585,7 +1628,7 @@ function createTicketsService({ pool, config }) {
           "Configure ton système de tickets et publie un panel premium **en quelques clics**.",
           "",
           `**Catégorie tickets :** ${settings.category_id ? `<#${settings.category_id}>` : "❌ Non définie"}`,
-          `**Rôle staff :** ${settings.staff_role_id ? `<@&${settings.staff_role_id}>` : "❌ Non défini"}`,
+          `**Rôle(s) staff :** ${formatStaffRolesMention(settings)}`,
           `**Salon feedback/transcripts :** ${
             settings.admin_feedback_channel_id ? `<#${settings.admin_feedback_channel_id}>` : "—"
           }`,
@@ -1668,7 +1711,7 @@ function createTicketsService({ pool, config }) {
       .setDescription("Choisis les éléments via menus. Aucun ID à copier.")
       .addFields(
         { name: "Catégorie tickets", value: settings.category_id ? `<#${settings.category_id}>` : "—", inline: true },
-        { name: "Rôle staff", value: settings.staff_role_id ? `<@&${settings.staff_role_id}>` : "—", inline: true },
+        { name: "Rôle(s) staff", value: formatStaffRolesMention(settings), inline: true },
         {
           name: "Salon admin (feedback/transcripts)",
           value: settings.admin_feedback_channel_id ? `<#${settings.admin_feedback_channel_id}>` : "—",
@@ -1686,7 +1729,9 @@ function createTicketsService({ pool, config }) {
     const row2 = new ActionRowBuilder().addComponents(
       new StringSelectMenuBuilder()
         .setCustomId("tsetup:set_staff")
-        .setPlaceholder("👮 Choisir rôle staff…")
+        .setPlaceholder("👮 Choisir rôle(s) staff…")
+        .setMinValues(1)
+        .setMaxValues(Math.max(1, Math.min(roles.length, 25)))
         .addOptions(roles.length ? roles : [{ label: "Aucun rôle trouvé", value: "none" }])
     );
 
@@ -2977,9 +3022,15 @@ function createTicketsService({ pool, config }) {
       }
       if (interaction.customId === "tsetup:set_staff") {
         if (!isAdmin(interaction)) return true;
-        const v = interaction.values?.[0];
-        if (v && v !== "none") await upsertSettings(interaction.guildId, { staff_role_id: v });
-        await replyEphemeral(interaction, { content: "✅ Rôle staff mis à jour." });
+        const selected = (interaction.values || []).filter((v) => v && v !== "none");
+        if (selected.length) {
+          await upsertSettings(interaction.guildId, { staff_role_ids: selected, staff_role_id: selected[0] });
+          await replyEphemeral(interaction, {
+            content: `✅ Rôle(s) staff mis à jour : ${selected.map((id) => `<@&${id}>`).join(", ")}`,
+          });
+        } else {
+          await replyEphemeral(interaction, { content: "⚠️ Aucun rôle valide sélectionné." });
+        }
         return true;
       }
       if (interaction.customId === "tsetup:set_adminch") {
@@ -3276,7 +3327,7 @@ function createTicketsService({ pool, config }) {
           .setTitle("⚙️ Ticket config (admin)")
           .addFields(
             { name: "Category", value: s.category_id ? `<#${s.category_id}>` : "—" },
-            { name: "Staff role", value: s.staff_role_id ? `<@&${s.staff_role_id}>` : "—", inline: true },
+            { name: "Staff role(s)", value: formatStaffRolesMention(s), inline: true },
             {
               name: "Admin feedback channel",
               value: s.admin_feedback_channel_id ? `<#${s.admin_feedback_channel_id}>` : "—",
@@ -3310,7 +3361,10 @@ function createTicketsService({ pool, config }) {
 
         const patch = {};
         if (category) patch.category_id = category.id;
-        if (staffRole) patch.staff_role_id = staffRole.id;
+        if (staffRole) {
+          patch.staff_role_id = staffRole.id;
+          patch.staff_role_ids = [staffRole.id];
+        }
         if (adminFb) patch.admin_feedback_channel_id = adminFb.id;
         if (transcriptCh) patch.transcript_channel_id = transcriptCh.id;
         if (maxOpen !== null && maxOpen !== undefined) patch.max_open_per_user = maxOpen;
