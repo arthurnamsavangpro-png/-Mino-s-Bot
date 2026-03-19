@@ -108,3 +108,16 @@ test('dispatchInteraction ignores invalid scoped service and falls back safely',
   assert.equal(handled, false);
   assert.equal(marker.length, 14);
 });
+
+test('createInteractionRouter exposes duplicate command handlers metadata', () => {
+  const marker = [];
+  const services = makeServices(marker, {
+    help: mkService(['shared-cmd'], false, marker),
+    tickets: mkService(['shared-cmd'], false, marker),
+  });
+
+  const router = createInteractionRouter(services);
+  assert.equal(router.duplicateCommands.length, 1);
+  assert.equal(router.duplicateCommands[0].commandName, 'shared-cmd');
+  assert.deepEqual(router.duplicateCommands[0].services.sort(), ['help', 'tickets']);
+});

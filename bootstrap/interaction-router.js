@@ -1,32 +1,35 @@
 function createInteractionRouter(services) {
-  const orderedServices = [
-    services.help,
-    services.tickets,
-    services.sendMessage,
-    services.giveaways,
-    services.automod,
-    services.updates,
-    services.absence,
-    services.invitations,
-    services.welcome,
-    services.serverstats,
-    services.worl,
-    services.moderation,
-    services.vouches,
-    services.rankup,
-    services.modrank,
-  ].filter(Boolean);
+  const orderedEntries = [
+    ['help', services.help],
+    ['tickets', services.tickets],
+    ['sendMessage', services.sendMessage],
+    ['giveaways', services.giveaways],
+    ['automod', services.automod],
+    ['updates', services.updates],
+    ['absence', services.absence],
+    ['invitations', services.invitations],
+    ['welcome', services.welcome],
+    ['serverstats', services.serverstats],
+    ['worl', services.worl],
+    ['moderation', services.moderation],
+    ['vouches', services.vouches],
+    ['rankup', services.rankup],
+    ['modrank', services.modrank],
+  ].filter(([, service]) => Boolean(service));
 
   const commandMap = new Map();
-  for (const service of orderedServices) {
+  for (const [serviceName, service] of orderedEntries) {
     if (typeof service.handleInteraction !== 'function') continue;
     for (const command of service.commands || []) {
       const json = typeof command.toJSON === 'function' ? command.toJSON() : command;
       if (!json?.name) continue;
       if (!commandMap.has(json.name)) commandMap.set(json.name, []);
-      commandMap.get(json.name).push(service);
+      commandMap.get(json.name).push({ serviceName, service });
     }
   }
+  const duplicateCommands = [...commandMap.entries()]
+    .filter(([, entries]) => entries.length > 1)
+    .map(([commandName, entries]) => ({ commandName, services: entries.map((entry) => entry.serviceName) }));
 
   async function dispatchInteraction(interaction, client) {
     if (interaction.isChatInputCommand()) {
@@ -34,7 +37,7 @@ function createInteractionRouter(services) {
 
       // Routage explicite: si la commande est connue, on n'interroge que ses handlers.
       if (scopedServices.length) {
-        for (const service of scopedServices) {
+        for (const { service } of scopedServices) {
           if (typeof service.handleInteraction !== 'function') continue;
           if (await service.handleInteraction(interaction, client)) return true;
         }
@@ -42,7 +45,7 @@ function createInteractionRouter(services) {
       }
 
       // Fallback uniquement pour commandes inconnues (compat/legacy).
-      for (const service of orderedServices) {
+      for (const [, service] of orderedEntries) {
         if (typeof service.handleInteraction !== 'function') continue;
         if (await service.handleInteraction(interaction, client)) return true;
       }
@@ -50,14 +53,14 @@ function createInteractionRouter(services) {
     }
 
     // Components/modals: certains services multiplexent via customId.
-    for (const service of orderedServices) {
+    for (const [, service] of orderedEntries) {
       if (typeof service.handleInteraction !== 'function') continue;
       if (await service.handleInteraction(interaction, client)) return true;
     }
     return false;
   }
 
-  return { dispatchInteraction, commandMap };
+  return { dispatchInteraction, commandMap, duplicateCommands };
 }
 
 module.exports = { createInteractionRouter };

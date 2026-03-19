@@ -19,6 +19,13 @@ function registerProcessSignals({ gracefulShutdown, logger }) {
 
 function registerClientEvents({ client, services, logger }) {
   const interactionRouter = createInteractionRouter(services);
+  if (interactionRouter.duplicateCommands.length) {
+    logger.warn({
+      module: 'interactions',
+      event: 'duplicate_command_handlers',
+      duplicates: interactionRouter.duplicateCommands,
+    });
+  }
 
   client.on('interactionCreate', async (interaction) => {
     const isSlash = interaction.isChatInputCommand();
