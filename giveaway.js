@@ -980,8 +980,11 @@ function createGiveawayService({ pool, config }) {
     }
   }
 
+  let giveawaySweeperInterval = null;
+
   function startGlobalGiveawaySweeper(client) {
-    setInterval(async () => {
+    if (giveawaySweeperInterval) return giveawaySweeperInterval;
+    giveawaySweeperInterval = setInterval(async () => {
       try {
         const res = await pool.query(
           `SELECT giveaway_id
@@ -1000,9 +1003,16 @@ function createGiveawayService({ pool, config }) {
         console.error("giveaway sweeper error:", e);
       }
     }, Math.max(5000, Number(config.GIVEAWAY_SWEEP_MS || 15000)));
+    return giveawaySweeperInterval;
   }
 
-  return { commands, handleInteraction, startGlobalGiveawaySweeper };
+  function stopGlobalGiveawaySweeper() {
+    if (!giveawaySweeperInterval) return;
+    clearInterval(giveawaySweeperInterval);
+    giveawaySweeperInterval = null;
+  }
+
+  return { commands, handleInteraction, startGlobalGiveawaySweeper, stopGlobalGiveawaySweeper };
 }
 
 module.exports = { createGiveawayService };
