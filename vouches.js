@@ -227,14 +227,24 @@ function createVouchesService({ pool, config, rankup }) {
     await msg.edit({ embeds: [embed] });
   }
 
+  let vouchboardInterval = null;
+
   function startGlobalVouchboardUpdater(client) {
-    setInterval(async () => {
+    if (vouchboardInterval) return vouchboardInterval;
+    vouchboardInterval = setInterval(async () => {
       for (const g of client.guilds.cache.values()) {
         updateVouchboardMessage(client, g.id).catch((e) =>
           console.error("updateVouchboardMessage:", e)
         );
       }
     }, config.VOUCHBOARD_REFRESH_MS);
+    return vouchboardInterval;
+  }
+
+  function stopGlobalVouchboardUpdater() {
+    if (!vouchboardInterval) return;
+    clearInterval(vouchboardInterval);
+    vouchboardInterval = null;
   }
 
   /* -------------------------------
@@ -557,6 +567,7 @@ function createVouchesService({ pool, config, rankup }) {
     handleInteraction,
     updateVouchboardMessage,
     startGlobalVouchboardUpdater,
+    stopGlobalVouchboardUpdater,
   };
 }
 
