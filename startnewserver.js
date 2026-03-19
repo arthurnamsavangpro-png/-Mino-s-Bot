@@ -49,7 +49,7 @@ function createStartNewServerService({ pool }) {
           '',
           '### 1) Sécurité & logs',
           '• `/log set` puis `/log events` pour activer les événements importants.',
-          '• `/automod preset` puis `/automod panel` pour une protection immédiate.',
+          '• AutoMod est volontairement laissé OFF pendant le boost (active-le plus tard si besoin).',
           '',
           '### 2) Accueil & rétention',
           '• `/welcome set` pour message + salon d’arrivée.',
@@ -73,7 +73,7 @@ function createStartNewServerService({ pool }) {
         [
           '1. Crée un salon `#logs-bot` privé au staff.',
           '2. Lance `/log set` puis `/log status`.',
-          '3. Lance `/automod preset` (mode strict conseillé pour serveurs publics).',
+          '3. Laisse AutoMod OFF pendant le setup, active-le seulement après vérification.',
           '4. Lance `/welcome set` avec un message clair + règles.',
           '5. Lance `/ticket-setup` puis `/ticket-panel`.',
           '6. Configure `/invite setlog` pour tracer les arrivées.',
@@ -175,6 +175,18 @@ function createStartNewServerService({ pool }) {
     });
   }
 
+  async function ensureRole(guild, name, colorHex) {
+    const existing = guild.roles.cache.find((r) => r.name.toLowerCase() === name.toLowerCase());
+    if (existing) return existing;
+    return guild.roles.create({
+      name,
+      color: colorHex || undefined,
+      mentionable: false,
+      hoist: false,
+      reason: 'Setup auto /startnewserver booster',
+    });
+  }
+
   async function runBoosterSetup(interaction) {
     const guild = interaction.guild;
     const guildId = interaction.guildId;
@@ -211,6 +223,36 @@ function createStartNewServerService({ pool }) {
     }
     if (!setupCategory) report.warnings.push('Impossible de créer la catégorie setup (permissions).');
 
+    let supportCategory = guild.channels.cache.find(
+      (ch) => ch.type === ChannelType.GuildCategory && ch.name === '🎫・support'
+    );
+    if (!supportCategory) {
+      supportCategory = await guild.channels
+        .create({ name: '🎫・support', type: ChannelType.GuildCategory })
+        .catch(() => null);
+    }
+    if (!supportCategory) report.warnings.push('Impossible de créer la catégorie support.');
+
+    let communityCategory = guild.channels.cache.find(
+      (ch) => ch.type === ChannelType.GuildCategory && ch.name === '📢・communication'
+    );
+    if (!communityCategory) {
+      communityCategory = await guild.channels
+        .create({ name: '📢・communication', type: ChannelType.GuildCategory })
+        .catch(() => null);
+    }
+    if (!communityCategory) report.warnings.push('Impossible de créer la catégorie communication.');
+
+    const staffRole = await ensureRole(guild, 'Staff', 0xed4245).catch(() => null);
+    const adminRole = await ensureRole(guild, 'Admin', 0x5865f2).catch(() => null);
+    const absenceRole = await ensureRole(guild, 'Absence', 0xfee75c).catch(() => null);
+    if (staffRole) report.ok.push(`Rôle staff prêt: <@&${staffRole.id}>.`);
+    else report.warnings.push('Rôle Staff non créé.');
+    if (adminRole) report.ok.push(`Rôle admin prêt: <@&${adminRole.id}>.`);
+    else report.warnings.push('Rôle Admin non créé.');
+    if (absenceRole) report.ok.push(`Rôle absence prêt: <@&${absenceRole.id}>.`);
+    else report.warnings.push('Rôle Absence non créé.');
+
     const logsMod = await ensureTextChannel(
       guild,
       'logs-moderation',
@@ -232,8 +274,38 @@ function createStartNewServerService({ pool }) {
     const welcomeChannel = await ensureTextChannel(
       guild,
       'bienvenue',
-      setupCategory?.id || null,
+      communityCategory?.id || setupCategory?.id || null,
       'Messages de bienvenue auto'
+    ).catch(() => null);
+    const updatesChannel = await ensureTextChannel(
+      guild,
+      'annonces-bot',
+      communityCategory?.id || setupCategory?.id || null,
+      'Mises à jour et annonces bot'
+    ).catch(() => null);
+    const vouchesChannel = await ensureTextChannel(
+      guild,
+      'vouches',
+      communityCategory?.id || setupCategory?.id || null,
+      'Canal pour les feedbacks/vouches'
+    ).catch(() => null);
+    const ticketsPanelChannel = await ensureTextChannel(
+      guild,
+      'tickets-accueil',
+      supportCategory?.id || null,
+      'Panel ouverture ticket'
+    ).catch(() => null);
+    const ticketsLogsChannel = await ensureTextChannel(
+      guild,
+      'tickets-logs',
+      supportCategory?.id || setupCategory?.id || null,
+      'Logs/transcripts tickets'
+    ).catch(() => null);
+    const absenceLogsChannel = await ensureTextChannel(
+      guild,
+      'absence-logs',
+      setupCategory?.id || null,
+      'Demandes et validations absences'
     ).catch(() => null);
 
     if (logsMod) report.ok.push(`Salon logs modération: ${logsMod}.`);
@@ -244,6 +316,16 @@ function createStartNewServerService({ pool }) {
     else report.warnings.push('Salon `annonces-invitations` non créé.');
     if (welcomeChannel) report.ok.push(`Salon bienvenue: ${welcomeChannel}.`);
     else report.warnings.push('Salon `bienvenue` non créé.');
+    if (updatesChannel) report.ok.push(`Salon updates bot: ${updatesChannel}.`);
+    else report.warnings.push('Salon `annonces-bot` non créé.');
+    if (vouchesChannel) report.ok.push(`Salon vouches: ${vouchesChannel}.`);
+    else report.warnings.push('Salon `vouches` non créé.');
+    if (ticketsPanelChannel) report.ok.push(`Salon panel tickets: ${ticketsPanelChannel}.`);
+    else report.warnings.push('Salon `tickets-accueil` non créé.');
+    if (ticketsLogsChannel) report.ok.push(`Salon logs tickets: ${ticketsLogsChannel}.`);
+    else report.warnings.push('Salon `tickets-logs` non créé.');
+    if (absenceLogsChannel) report.ok.push(`Salon logs absences: ${absenceLogsChannel}.`);
+    else report.warnings.push('Salon `absence-logs` non créé.');
 
     if (logsMod) {
       await pool
@@ -301,6 +383,87 @@ function createStartNewServerService({ pool }) {
       )
       .then(() => report.ok.push('Message de bienvenue activé.'))
       .catch(() => report.warnings.push('Configuration DB du welcome échouée.'));
+
+    await pool
+      .query(
+        `INSERT INTO updates_settings (guild_id, channel_id, enabled, updated_at)
+         VALUES ($1, $2, TRUE, NOW())
+         ON CONFLICT (guild_id) DO UPDATE
+           SET channel_id = EXCLUDED.channel_id,
+               enabled = TRUE,
+               updated_at = NOW()`,
+        [guildId, updatesChannel?.id || null]
+      )
+      .then(() => report.ok.push('Canal updates/broadcast configuré.'))
+      .catch(() => report.warnings.push('Configuration DB updates échouée.'));
+
+    await pool
+      .query(
+        `INSERT INTO ticket_settings (
+           guild_id, category_id, staff_role_id, admin_feedback_channel_id, transcript_channel_id,
+           max_open_per_user, cooldown_seconds, claim_exclusive, delete_on_close, updated_at
+         )
+         VALUES ($1, $2, $3, $4, $5, 1, 300, TRUE, FALSE, NOW())
+         ON CONFLICT (guild_id) DO UPDATE
+           SET category_id = EXCLUDED.category_id,
+               staff_role_id = EXCLUDED.staff_role_id,
+               admin_feedback_channel_id = EXCLUDED.admin_feedback_channel_id,
+               transcript_channel_id = EXCLUDED.transcript_channel_id,
+               max_open_per_user = EXCLUDED.max_open_per_user,
+               cooldown_seconds = EXCLUDED.cooldown_seconds,
+               claim_exclusive = EXCLUDED.claim_exclusive,
+               delete_on_close = EXCLUDED.delete_on_close,
+               updated_at = NOW()`,
+        [
+          guildId,
+          supportCategory?.id || null,
+          staffRole?.id || adminRole?.id || null,
+          ticketsLogsChannel?.id || null,
+          ticketsLogsChannel?.id || null,
+        ]
+      )
+      .then(() => report.ok.push('Ticket settings pré-configurés (catégorie, staff, transcripts).'))
+      .catch(() => report.warnings.push('Configuration DB tickets échouée.'));
+
+    await pool
+      .query(
+        `INSERT INTO absence_settings (guild_id, staff_role_id, admin_role_id, absence_role_id, log_channel_id, updated_at)
+         VALUES ($1, $2, $3, $4, $5, NOW())
+         ON CONFLICT (guild_id) DO UPDATE
+           SET staff_role_id = EXCLUDED.staff_role_id,
+               admin_role_id = EXCLUDED.admin_role_id,
+               absence_role_id = EXCLUDED.absence_role_id,
+               log_channel_id = EXCLUDED.log_channel_id,
+               updated_at = NOW()`,
+        [guildId, staffRole?.id || null, adminRole?.id || null, absenceRole?.id || null, absenceLogsChannel?.id || null]
+      )
+      .then(() => report.ok.push('Module absences staff pré-configuré.'))
+      .catch(() => report.warnings.push('Configuration DB absences échouée.'));
+
+    await pool
+      .query(
+        `INSERT INTO modrank_settings (guild_id, announce_channel_id, log_channel_id, dm_enabled, ping_enabled, mode, updated_at)
+         VALUES ($1, $2, $3, FALSE, FALSE, 'highest', NOW())
+         ON CONFLICT (guild_id) DO UPDATE
+           SET announce_channel_id = EXCLUDED.announce_channel_id,
+               log_channel_id = EXCLUDED.log_channel_id,
+               updated_at = NOW()`,
+        [guildId, updatesChannel?.id || null, logsMod?.id || null]
+      )
+      .then(() => report.ok.push('Module ModRank pré-configuré (announce + logs).'))
+      .catch(() => report.warnings.push('Configuration DB modrank échouée.'));
+
+    await pool
+      .query(
+        `INSERT INTO vouch_settings (guild_id, vouch_channel_id, updated_at)
+         VALUES ($1, $2, NOW())
+         ON CONFLICT (guild_id) DO UPDATE
+           SET vouch_channel_id = EXCLUDED.vouch_channel_id,
+               updated_at = NOW()`,
+        [guildId, vouchesChannel?.id || null]
+      )
+      .then(() => report.ok.push('Canal vouches configuré.'))
+      .catch(() => report.warnings.push('Configuration DB vouches échouée.'));
 
     await pool
       .query(
