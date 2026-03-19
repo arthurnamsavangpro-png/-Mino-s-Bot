@@ -384,7 +384,11 @@ function buildTicketChannelName({ claimed, username, categoryLabel }) {
 async function tryRenameTicketChannel(channel, newName) {
   if (!channel || !channel.setName) return;
   if (!newName || channel.name === newName) return;
-  await channel.setName(newName).catch(() => {});
+  const renamePromise = channel.setName(newName).catch(() => null);
+  await Promise.race([
+    renamePromise,
+    new Promise((resolve) => setTimeout(resolve, 1500)),
+  ]);
 }
 
 /* ---------------- Premium UI Helpers ---------------- */
