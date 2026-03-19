@@ -511,7 +511,7 @@ async function applyLockdown(pool, guild, settings, seconds) {
       try {
         await ch.permissionOverwrites.edit(everyone, { SendMessages: false });
         locked.push(ch.id);
-      } catch {}
+      } catch (error) { console.warn(`[safe] ${error?.message || error}`); }
     }
   }
 
@@ -537,7 +537,7 @@ async function clearLockdown(pool, guild, settings) {
     try {
       // reset overwrite for SendMessages (null => inherit)
       await ch.permissionOverwrites.edit(everyone, { SendMessages: null });
-    } catch {}
+    } catch (error) { console.warn(`[safe] ${error?.message || error}`); }
   }
 
   const next = {
@@ -567,7 +567,7 @@ async function applyAutomodAction({
 
   // delete if asked (safe)
   if (messageToDelete && (action === "delete" || action === "warn" || action === "timeout" || action === "ban")) {
-    await messageToDelete.delete().catch(() => {});
+    await messageToDelete.delete().catch((error) => { console.warn(`[safe] ${error?.message || error}`); });
   }
 
   // lock actions
@@ -591,7 +591,7 @@ async function applyAutomodAction({
   // TIMEOUT
   if (action === "timeout") {
     if (member && member.moderatable) {
-      await member.timeout(durationMs || 10 * 60 * 1000, `Automod | ${reason}`.slice(0, 480)).catch(() => {});
+      await member.timeout(durationMs || 10 * 60 * 1000, `Automod | ${reason}`.slice(0, 480)).catch((error) => { console.warn(`[safe] ${error?.message || error}`); });
     }
 
     const embed = redEmbed()
@@ -620,7 +620,7 @@ async function applyAutomodAction({
 
     if (logMsg) {
       const updated = EmbedBuilder.from(embed).addFields({ name: "Case ID", value: `#${caseId}`, inline: true });
-      await logMsg.edit({ embeds: [updated] }).catch(() => {});
+      await logMsg.edit({ embeds: [updated] }).catch((error) => { console.warn(`[safe] ${error?.message || error}`); });
     }
 
     return { ok: true, caseId, settings };
@@ -653,7 +653,7 @@ async function applyAutomodAction({
 
     if (logMsg) {
       const updated = EmbedBuilder.from(embed).addFields({ name: "Case ID", value: `#${caseId}`, inline: true });
-      await logMsg.edit({ embeds: [updated] }).catch(() => {});
+      await logMsg.edit({ embeds: [updated] }).catch((error) => { console.warn(`[safe] ${error?.message || error}`); });
     }
 
     return { ok: true, caseId, settings };
@@ -662,9 +662,9 @@ async function applyAutomodAction({
   // BAN
   if (action === "ban") {
     if (user) {
-      await guild.members.ban(user.id, { reason: `Automod | ${reason}`.slice(0, 480) }).catch(() => {});
+      await guild.members.ban(user.id, { reason: `Automod | ${reason}`.slice(0, 480) }).catch((error) => { console.warn(`[safe] ${error?.message || error}`); });
     } else if (member) {
-      await guild.members.ban(member.id, { reason: `Automod | ${reason}`.slice(0, 480) }).catch(() => {});
+      await guild.members.ban(member.id, { reason: `Automod | ${reason}`.slice(0, 480) }).catch((error) => { console.warn(`[safe] ${error?.message || error}`); });
     }
 
     const embed = redEmbed()
@@ -692,7 +692,7 @@ async function applyAutomodAction({
 
     if (logMsg) {
       const updated = EmbedBuilder.from(embed).addFields({ name: "Case ID", value: `#${caseId}`, inline: true });
-      await logMsg.edit({ embeds: [updated] }).catch(() => {});
+      await logMsg.edit({ embeds: [updated] }).catch((error) => { console.warn(`[safe] ${error?.message || error}`); });
     }
 
     return { ok: true, caseId, settings };
@@ -727,7 +727,7 @@ async function applyAutomodAction({
   // KICK (optionnel)
   if (action === "kick") {
     if (member && member.kickable) {
-      await member.kick(`Automod | ${reason}`.slice(0, 480)).catch(() => {});
+      await member.kick(`Automod | ${reason}`.slice(0, 480)).catch((error) => { console.warn(`[safe] ${error?.message || error}`); });
     }
 
     const embed = redEmbed()
@@ -810,7 +810,7 @@ function createAutomodService({ pool, config }) {
       if (ch && isTextChannelLike(ch)) {
         const msg = await ch.messages.fetch(s.panel.message_id).catch(() => null);
         if (msg) {
-          await msg.edit({ embeds: [embed], components: rows }).catch(() => {});
+          await msg.edit({ embeds: [embed], components: rows }).catch((error) => { console.warn(`[safe] ${error?.message || error}`); });
           return { settings: s, message: msg };
         }
       }
@@ -842,7 +842,7 @@ function createAutomodService({ pool, config }) {
 
     const components = section ? buildSectionRows(s, section) : buildMainRows(s);
 
-    await msg.edit({ embeds: [embed], components }).catch(() => {});
+    await msg.edit({ embeds: [embed], components }).catch((error) => { console.warn(`[safe] ${error?.message || error}`); });
   }
 
   /** -------------- Modals builders -------------- */
@@ -1437,7 +1437,7 @@ function createAutomodService({ pool, config }) {
         await new Promise((r) => setTimeout(r, 1200));
         const logs = await guild.fetchAuditLogs({ type: AuditLogEvent.ChannelCreate, limit: 1 }).catch(() => null);
         executor = logs?.entries?.first()?.executor || null;
-      } catch {}
+      } catch (error) { console.warn(`[safe] ${error?.message || error}`); }
 
       const reason = `Mass channel create détecté: ${arr.length} créations / 10s`;
       if (s.admin_raid.action === "lockdown") {
@@ -1477,7 +1477,7 @@ function createAutomodService({ pool, config }) {
         await new Promise((r) => setTimeout(r, 1200));
         const logs = await guild.fetchAuditLogs({ type: AuditLogEvent.ChannelDelete, limit: 1 }).catch(() => null);
         executor = logs?.entries?.first()?.executor || null;
-      } catch {}
+      } catch (error) { console.warn(`[safe] ${error?.message || error}`); }
 
       const reason = `Mass channel delete détecté: ${arr.length} suppressions / 10s`;
       if (s.admin_raid.action === "lockdown") {
@@ -1517,7 +1517,7 @@ function createAutomodService({ pool, config }) {
         await new Promise((r) => setTimeout(r, 1200));
         const logs = await guild.fetchAuditLogs({ type: AuditLogEvent.WebhookCreate, limit: 1 }).catch(() => null);
         executor = logs?.entries?.first()?.executor || null;
-      } catch {}
+      } catch (error) { console.warn(`[safe] ${error?.message || error}`); }
 
       const reason = `Webhook spam détecté: ${arr.length} updates / 30s`;
 
@@ -2053,7 +2053,7 @@ function createAutomodService({ pool, config }) {
       console.error("automod interaction fatal:", e);
       if (interaction?.isRepliable?.()) {
         if (!interaction.deferred && !interaction.replied) {
-          await interaction.reply({ content: "⚠️ Erreur interne Automod (voir logs).", flags: MessageFlags.Ephemeral }).catch(() => {});
+          await interaction.reply({ content: "⚠️ Erreur interne Automod (voir logs).", flags: MessageFlags.Ephemeral }).catch((error) => { console.warn(`[safe] ${error?.message || error}`); });
         }
       }
       return true;

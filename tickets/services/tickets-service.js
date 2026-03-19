@@ -179,27 +179,27 @@ async function replyEphemeral(interaction, payload) {
     try {
       return await interaction.editReply(pEdit);
     } catch {
-      return await interaction.followUp(pReply).catch(() => {});
+      return await interaction.followUp(pReply).catch((error) => { console.warn(`[safe] ${error?.message || error}`); });
     }
   }
 
-  return await interaction.reply(pReply).catch(() => {});
+  return await interaction.reply(pReply).catch((error) => { console.warn(`[safe] ${error?.message || error}`); });
 }
 
 async function safeDeferUpdate(interaction) {
   if (interaction.deferred || interaction.replied) return;
-  await interaction.deferUpdate().catch(() => {});
+  await interaction.deferUpdate().catch((error) => { console.warn(`[safe] ${error?.message || error}`); });
 }
 
 async function safeFollowUpEphemeral(interaction, payload) {
   const p = { ...payload, flags: MessageFlags.Ephemeral };
   delete p.ephemeral;
-  await interaction.followUp(p).catch(() => {});
+  await interaction.followUp(p).catch((error) => { console.warn(`[safe] ${error?.message || error}`); });
 }
 
 async function safeChannelSend(channel, content) {
   if (!channel?.isTextBased?.()) return;
-  await channel.send({ content }).catch(() => {});
+  await channel.send({ content }).catch((error) => { console.warn(`[safe] ${error?.message || error}`); });
 }
 
 async function fetchAllMessages(channel, maxMessages = 1000) {
@@ -262,7 +262,7 @@ async function acquireTicketLock(ticketId, timeoutMs = 15000) {
   while (ticketLocks.has(key)) {
     const entry = ticketLocks.get(key);
     if (!entry) break;
-    await entry.promise.catch(() => {});
+    await entry.promise.catch((error) => { console.warn(`[safe] ${error?.message || error}`); });
   }
 
   let released = false;
@@ -433,7 +433,7 @@ async function updateTicketMessage(interaction, data) {
   const embed = buildTicketEmbed(data);
   const controls = buildTicketControls(data.ticketId, Boolean(data.claimedBy));
 
-  await msg.edit({ content: msg.content ?? undefined, embeds: [embed], components: [controls] }).catch(() => {});
+  await msg.edit({ content: msg.content ?? undefined, embeds: [embed], components: [controls] }).catch((error) => { console.warn(`[safe] ${error?.message || error}`); });
 }
 
 /* ---------------- Wizard Drafts (Admin) ---------------- */
@@ -929,14 +929,14 @@ function createTicketsService({ pool, config, logger }) {
 
     if (finalClaimedBy) {
       for (const roleId of staffRoleIds) {
-        await channel.permissionOverwrites.edit(roleId, { SendMessages: false }).catch(() => {});
+        await channel.permissionOverwrites.edit(roleId, { SendMessages: false }).catch((error) => { console.warn(`[safe] ${error?.message || error}`); });
       }
       await channel.permissionOverwrites
         .edit(finalClaimedBy, { SendMessages: true, ViewChannel: true })
-        .catch(() => {});
+        .catch((error) => { console.warn(`[safe] ${error?.message || error}`); });
     } else {
       for (const roleId of staffRoleIds) {
-        await channel.permissionOverwrites.edit(roleId, { SendMessages: true }).catch(() => {});
+        await channel.permissionOverwrites.edit(roleId, { SendMessages: true }).catch((error) => { console.warn(`[safe] ${error?.message || error}`); });
       }
     }
   }
@@ -1085,7 +1085,7 @@ function createTicketsService({ pool, config, logger }) {
     if (interaction.channel?.isTextBased?.()) {
       await interaction.channel
         .send({ content: `<@${ticketRow.opener_id}>`, embeds: [embed], components: [row] })
-        .catch(() => {});
+        .catch((error) => { console.warn(`[safe] ${error?.message || error}`); });
     }
   }
 
@@ -1116,7 +1116,7 @@ function createTicketsService({ pool, config, logger }) {
       if (interaction.channel) {
         await interaction.channel.permissionOverwrites
           .edit(ticket.opener_id, { SendMessages: false, ViewChannel: true })
-          .catch(() => {});
+          .catch((error) => { console.warn(`[safe] ${error?.message || error}`); });
       }
 
       await safeChannelSend(interaction.channel, `🔒 Ticket fermé par <@${interaction.user.id}>.`);
@@ -1157,7 +1157,7 @@ function createTicketsService({ pool, config, logger }) {
               )
               .setTimestamp();
 
-            await adminTranscriptChannel.send({ embeds: [embed], files: [file] }).catch(() => {});
+            await adminTranscriptChannel.send({ embeds: [embed], files: [file] }).catch((error) => { console.warn(`[safe] ${error?.message || error}`); });
           }
         }
       }
@@ -1166,7 +1166,7 @@ function createTicketsService({ pool, config, logger }) {
 
       if (settings.delete_on_close && interaction.channel) {
         setTimeout(() => {
-          interaction.channel.delete("Ticket auto-delete after close").catch(() => {});
+          interaction.channel.delete("Ticket auto-delete after close").catch((error) => { console.warn(`[safe] ${error?.message || error}`); });
         }, 10_000);
       }
 
@@ -1196,7 +1196,7 @@ function createTicketsService({ pool, config, logger }) {
       const guild = await client.guilds.fetch(ticket.guild_id).catch(() => null);
       if (guild) {
         const ch = await guild.channels.fetch(ticket.channel_id).catch(() => null);
-        if (ch) await ch.delete("Ticket deleted by admin").catch(() => {});
+        if (ch) await ch.delete("Ticket deleted by admin").catch((error) => { console.warn(`[safe] ${error?.message || error}`); });
       }
 
       await pool.query(`DELETE FROM tickets WHERE ticket_id=$1`, [ticketId]);
@@ -1279,7 +1279,7 @@ function createTicketsService({ pool, config, logger }) {
         )
         .setTimestamp();
 
-      await adminTranscriptChannel.send({ embeds: [embed], files: [file] }).catch(() => {});
+      await adminTranscriptChannel.send({ embeds: [embed], files: [file] }).catch((error) => { console.warn(`[safe] ${error?.message || error}`); });
       await safeFollowUpEphemeral(interaction, { content: `✅ Transcript envoyé dans <#${adminTranscriptChannel.id}>.` });
 
       return true;
@@ -1387,7 +1387,7 @@ function createTicketsService({ pool, config, logger }) {
           const msg = ch?.isTextBased?.() ? await ch.messages.fetch(fb.log_message_id).catch(() => null) : null;
 
           if (msg) {
-            await msg.edit({ embeds: [embed] }).catch(() => {});
+            await msg.edit({ embeds: [embed] }).catch((error) => { console.warn(`[safe] ${error?.message || error}`); });
           } else {
             const sent = await adminFeedback.send({ embeds: [embed] }).catch(() => null);
             if (sent) await upsertFeedbackLogMessage(ticketId, sent.channel.id, sent.id);
@@ -1624,7 +1624,7 @@ function createTicketsService({ pool, config, logger }) {
 
     modal.addComponents(new ActionRowBuilder().addComponents(maxOpen), new ActionRowBuilder().addComponents(cooldownMin));
 
-    await interaction.showModal(modal).catch(() => {});
+    await interaction.showModal(modal).catch((error) => { console.warn(`[safe] ${error?.message || error}`); });
     return true;
   }
 
@@ -1711,7 +1711,7 @@ function createTicketsService({ pool, config, logger }) {
       new ActionRowBuilder().addComponents(emoji)
     );
 
-    await interaction.showModal(modal).catch(() => {});
+    await interaction.showModal(modal).catch((error) => { console.warn(`[safe] ${error?.message || error}`); });
     return true;
   }
 
@@ -1741,7 +1741,7 @@ function createTicketsService({ pool, config, logger }) {
         components: [new ActionRowBuilder().addComponents(menu)],
         flags: MessageFlags.Ephemeral,
       })
-      .catch(() => {});
+      .catch((error) => { console.warn(`[safe] ${error?.message || error}`); });
     return true;
   }
 
@@ -1776,7 +1776,7 @@ function createTicketsService({ pool, config, logger }) {
         components: [new ActionRowBuilder().addComponents(menu)],
         flags: MessageFlags.Ephemeral,
       })
-      .catch(() => {});
+      .catch((error) => { console.warn(`[safe] ${error?.message || error}`); });
     return true;
   }
 
@@ -1798,7 +1798,7 @@ function createTicketsService({ pool, config, logger }) {
         components: [new ActionRowBuilder().addComponents(menu)],
         flags: MessageFlags.Ephemeral,
       })
-      .catch(() => {});
+      .catch((error) => { console.warn(`[safe] ${error?.message || error}`); });
     return true;
   }
 
@@ -2036,7 +2036,7 @@ function createTicketsService({ pool, config, logger }) {
       .setValue((draft.description || "").slice(0, 1500));
 
     modal.addComponents(new ActionRowBuilder().addComponents(title), new ActionRowBuilder().addComponents(desc));
-    await interaction.showModal(modal).catch(() => {});
+    await interaction.showModal(modal).catch((error) => { console.warn(`[safe] ${error?.message || error}`); });
     return true;
   }
 
@@ -2064,7 +2064,7 @@ function createTicketsService({ pool, config, logger }) {
       .setPlaceholder("haut");
 
     modal.addComponents(new ActionRowBuilder().addComponents(banner), new ActionRowBuilder().addComponents(position));
-    await interaction.showModal(modal).catch(() => {});
+    await interaction.showModal(modal).catch((error) => { console.warn(`[safe] ${error?.message || error}`); });
     return true;
   }
 
@@ -2076,7 +2076,7 @@ function createTicketsService({ pool, config, logger }) {
     const embed = buildPanelBuilderHomeEmbed(interaction.guild, draft);
     await interaction
       .update({ embeds: [embed], components: buildPanelBuilderHomeComponents(draft), content: "" })
-      .catch(() => {});
+      .catch((error) => { console.warn(`[safe] ${error?.message || error}`); });
     return true;
   }
 
@@ -2088,7 +2088,7 @@ function createTicketsService({ pool, config, logger }) {
     const embed = buildPanelBuilderHomeEmbed(interaction.guild, draft);
     await interaction
       .update({ embeds: [embed], components: buildPanelBuilderHomeComponents(draft), content: "" })
-      .catch(() => {});
+      .catch((error) => { console.warn(`[safe] ${error?.message || error}`); });
     return true;
   }
 
@@ -2123,7 +2123,7 @@ function createTicketsService({ pool, config, logger }) {
       new ButtonBuilder().setCustomId("tpnl:home").setLabel("Retour").setStyle(ButtonStyle.Secondary).setEmoji("⬅️")
     );
 
-    await interaction.update({ embeds: [embed], components: [row] }).catch(() => {});
+    await interaction.update({ embeds: [embed], components: [row] }).catch((error) => { console.warn(`[safe] ${error?.message || error}`); });
     return true;
   }
 
@@ -2171,7 +2171,7 @@ function createTicketsService({ pool, config, logger }) {
       new ActionRowBuilder().addComponents(emoji)
     );
 
-    await interaction.showModal(modal).catch(() => {});
+    await interaction.showModal(modal).catch((error) => { console.warn(`[safe] ${error?.message || error}`); });
     return true;
   }
 
@@ -2201,7 +2201,7 @@ function createTicketsService({ pool, config, logger }) {
         components: [new ActionRowBuilder().addComponents(menu)],
         flags: MessageFlags.Ephemeral,
       })
-      .catch(() => {});
+      .catch((error) => { console.warn(`[safe] ${error?.message || error}`); });
     return true;
   }
 
@@ -2223,7 +2223,7 @@ function createTicketsService({ pool, config, logger }) {
         components: [new ActionRowBuilder().addComponents(menu)],
         flags: MessageFlags.Ephemeral,
       })
-      .catch(() => {});
+      .catch((error) => { console.warn(`[safe] ${error?.message || error}`); });
     return true;
   }
 
@@ -2283,7 +2283,7 @@ function createTicketsService({ pool, config, logger }) {
       new ActionRowBuilder().addComponents(cat)
     );
 
-    await interaction.showModal(modal).catch(() => {});
+    await interaction.showModal(modal).catch((error) => { console.warn(`[safe] ${error?.message || error}`); });
     return true;
   }
 
@@ -2300,7 +2300,7 @@ function createTicketsService({ pool, config, logger }) {
         components: [row],
         flags: MessageFlags.Ephemeral,
       })
-      .catch(() => {});
+      .catch((error) => { console.warn(`[safe] ${error?.message || error}`); });
   }
 
   async function panelBuilderAskButtonColor(interaction) {
@@ -2320,7 +2320,7 @@ function createTicketsService({ pool, config, logger }) {
         components: [new ActionRowBuilder().addComponents(menu)],
         flags: MessageFlags.Ephemeral,
       })
-      .catch(() => {});
+      .catch((error) => { console.warn(`[safe] ${error?.message || error}`); });
   }
 
   async function panelBuilderOpenButtonLabelModal(interaction) {
@@ -2339,7 +2339,7 @@ function createTicketsService({ pool, config, logger }) {
 
     modal.addComponents(new ActionRowBuilder().addComponents(input));
 
-    await interaction.showModal(modal).catch(() => {});
+    await interaction.showModal(modal).catch((error) => { console.warn(`[safe] ${error?.message || error}`); });
     return true;
   }
 
@@ -2378,7 +2378,7 @@ function createTicketsService({ pool, config, logger }) {
     if (visual.emoji) {
       try {
         btn.setEmoji(visual.emoji);
-      } catch {}
+      } catch (error) { console.warn(`[safe] ${error?.message || error}`); }
     }
 
     return { embeds, components: [new ActionRowBuilder().addComponents(btn)], label, value };
@@ -2416,7 +2416,7 @@ function createTicketsService({ pool, config, logger }) {
         if (parsedEmoji) {
           try {
             b.setEmoji(parsedEmoji);
-          } catch {}
+          } catch (error) { console.warn(`[safe] ${error?.message || error}`); }
         }
         row.addComponents(b);
       }
@@ -2451,7 +2451,7 @@ function createTicketsService({ pool, config, logger }) {
         components: built.components,
         flags: MessageFlags.Ephemeral,
       })
-      .catch(() => {});
+      .catch((error) => { console.warn(`[safe] ${error?.message || error}`); });
     return true;
   }
 
@@ -2462,7 +2462,7 @@ function createTicketsService({ pool, config, logger }) {
     if (!channelId) {
       await interaction
         .reply({ content: "⚠️ Choisis d’abord un salon (bouton **Salon**).", flags: MessageFlags.Ephemeral })
-        .catch(() => {});
+        .catch((error) => { console.warn(`[safe] ${error?.message || error}`); });
       return true;
     }
 
@@ -2473,14 +2473,14 @@ function createTicketsService({ pool, config, logger }) {
           content: "⚠️ Configure d’abord la catégorie tickets via `/ticket-config set category:...`.",
           flags: MessageFlags.Ephemeral,
         })
-        .catch(() => {});
+        .catch((error) => { console.warn(`[safe] ${error?.message || error}`); });
       return true;
     }
 
     const guild = interaction.guild;
     const ch = await guild.channels.fetch(channelId).catch(() => null);
     if (!ch || !ch.isTextBased?.()) {
-      await interaction.reply({ content: "⚠️ Salon invalide.", flags: MessageFlags.Ephemeral }).catch(() => {});
+      await interaction.reply({ content: "⚠️ Salon invalide.", flags: MessageFlags.Ephemeral }).catch((error) => { console.warn(`[safe] ${error?.message || error}`); });
       return true;
     }
 
@@ -2524,7 +2524,7 @@ function createTicketsService({ pool, config, logger }) {
 
       await interaction
         .reply({ content: `✅ Panel (Mode Simple) publié dans <#${msg.channel.id}>.`, flags: MessageFlags.Ephemeral })
-        .catch(() => {});
+        .catch((error) => { console.warn(`[safe] ${error?.message || error}`); });
       return true;
     }
 
@@ -2570,7 +2570,7 @@ function createTicketsService({ pool, config, logger }) {
         if (parsedEmoji) {
           try {
             b.setEmoji(parsedEmoji);
-          } catch {}
+          } catch (error) { console.warn(`[safe] ${error?.message || error}`); }
         }
         row.addComponents(b);
       }
@@ -2603,7 +2603,7 @@ function createTicketsService({ pool, config, logger }) {
 
     await interaction
       .reply({ content: `✅ Panel publié dans <#${msg.channel.id}>.`, flags: MessageFlags.Ephemeral })
-      .catch(() => {});
+      .catch((error) => { console.warn(`[safe] ${error?.message || error}`); });
     return true;
   }
 
@@ -2849,7 +2849,7 @@ function createTicketsService({ pool, config, logger }) {
         const subject = interaction.fields.getTextInputValue("subject");
         const details = interaction.fields.getTextInputValue("details");
 
-        await interaction.deferReply({ flags: MessageFlags.Ephemeral }).catch(() => {});
+        await interaction.deferReply({ flags: MessageFlags.Ephemeral }).catch((error) => { console.warn(`[safe] ${error?.message || error}`); });
         return await createTicket(interaction, label || selected || "Support", subject, details);
       }
 
@@ -2977,7 +2977,7 @@ function createTicketsService({ pool, config, logger }) {
 
           const useForm = await shouldUseFormForPanel("preview", interaction);
           if (!useForm) {
-            await interaction.deferReply({ flags: MessageFlags.Ephemeral }).catch(() => {});
+            await interaction.deferReply({ flags: MessageFlags.Ephemeral }).catch((error) => { console.warn(`[safe] ${error?.message || error}`); });
             return await createTicket(interaction, label);
           }
           return await openPremiumModal(interaction, "preview", value, label);
@@ -2992,7 +2992,7 @@ function createTicketsService({ pool, config, logger }) {
 
         const useForm = await shouldUseFormForPanel(panelId, interaction);
         if (!useForm) {
-          await interaction.deferReply({ flags: MessageFlags.Ephemeral }).catch(() => {});
+          await interaction.deferReply({ flags: MessageFlags.Ephemeral }).catch((error) => { console.warn(`[safe] ${error?.message || error}`); });
           return await createTicket(interaction, label);
         }
 
@@ -3014,7 +3014,7 @@ function createTicketsService({ pool, config, logger }) {
           label = found?.label || null;
         }
 
-        await interaction.deferReply({ flags: MessageFlags.Ephemeral }).catch(() => {});
+        await interaction.deferReply({ flags: MessageFlags.Ephemeral }).catch((error) => { console.warn(`[safe] ${error?.message || error}`); });
         return await createTicket(interaction, label || value || "Support");
       }
 
@@ -3028,14 +3028,14 @@ function createTicketsService({ pool, config, logger }) {
         if (!isAdmin(interaction)) return true;
 
         if (interaction.customId === "tsetup:close") {
-          await interaction.update({ content: "✅ Fermé.", embeds: [], components: [] }).catch(() => {});
+          await interaction.update({ content: "✅ Fermé.", embeds: [], components: [] }).catch((error) => { console.warn(`[safe] ${error?.message || error}`); });
           return true;
         }
         if (interaction.customId === "tsetup:home") {
           const settings = await getSettings(interaction.guildId);
           const draft = getDraft(interaction.guildId, interaction.user.id);
           const embed = buildSetupHomeEmbed(interaction.guild, settings, draft);
-          await interaction.update({ embeds: [embed], components: buildSetupHomeComponents(), content: "" }).catch(() => {});
+          await interaction.update({ embeds: [embed], components: buildSetupHomeComponents(), content: "" }).catch((error) => { console.warn(`[safe] ${error?.message || error}`); });
           return true;
         }
         if (interaction.customId === "tsetup:config") return await setupConfig(interaction);
@@ -3056,7 +3056,7 @@ function createTicketsService({ pool, config, logger }) {
         if (!isAdmin(interaction)) return true;
 
         if (interaction.customId === "tpnl:close") {
-          await interaction.update({ content: "✅ Fermé.", embeds: [], components: [] }).catch(() => {});
+          await interaction.update({ content: "✅ Fermé.", embeds: [], components: [] }).catch((error) => { console.warn(`[safe] ${error?.message || error}`); });
           return true;
         }
 
@@ -3066,7 +3066,7 @@ function createTicketsService({ pool, config, logger }) {
           const embed = buildPanelBuilderHomeEmbed(interaction.guild, draft);
           await interaction
             .update({ embeds: [embed], components: buildPanelBuilderHomeComponents(draft), content: "" })
-            .catch(() => {});
+            .catch((error) => { console.warn(`[safe] ${error?.message || error}`); });
           return true;
         }
 
@@ -3111,7 +3111,7 @@ function createTicketsService({ pool, config, logger }) {
 
         const useForm = await shouldUseFormForPanel(panelId, interaction);
         if (!useForm) {
-          await interaction.deferReply({ flags: MessageFlags.Ephemeral }).catch(() => {});
+          await interaction.deferReply({ flags: MessageFlags.Ephemeral }).catch((error) => { console.warn(`[safe] ${error?.message || error}`); });
           return await createTicket(interaction, label || value || "Support");
         }
 
@@ -3129,7 +3129,7 @@ function createTicketsService({ pool, config, logger }) {
           const payload = parsePanelPayload(panel?.categories);
           const reason = normalizeFreeReason(payload?.simple_reason) || "Support";
 
-          await interaction.deferReply({ flags: MessageFlags.Ephemeral }).catch(() => {});
+          await interaction.deferReply({ flags: MessageFlags.Ephemeral }).catch((error) => { console.warn(`[safe] ${error?.message || error}`); });
           return await createTicket(interaction, reason);
         }
 
