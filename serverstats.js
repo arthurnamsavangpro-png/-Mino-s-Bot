@@ -276,10 +276,20 @@ function createServerStatsService({ pool }) {
     }
   }
 
+  let schedulerInterval = null;
+
   function startScheduler(client) {
-    setInterval(() => {
+    if (schedulerInterval) return schedulerInterval;
+    schedulerInterval = setInterval(() => {
       refreshAll(client).catch(() => {});
     }, 120_000);
+    return schedulerInterval;
+  }
+
+  function stopScheduler() {
+    if (!schedulerInterval) return;
+    clearInterval(schedulerInterval);
+    schedulerInterval = null;
   }
 
   function buildSetupPanel() {
@@ -576,6 +586,7 @@ function createServerStatsService({ pool }) {
     refreshGuildStats,
     handlePresenceUpdate,
     startScheduler,
+    stopScheduler,
     ensureTable,
   };
 }

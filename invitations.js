@@ -8,6 +8,28 @@ const {
 function createInvitationsService({ pool }) {
   const inviteCache = new Map(); // guildId -> Map(code -> uses)
 
+  async function withTransaction(fn) {
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      const result = await fn(client);
+      await client.query('COMMIT');
+      return result;
+    } catch (error) {
+      await client.query('ROLLBACK').catch(() => {});
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  function logTransactionError(scope, context, error) {
+    console.error(`[invitations] transaction failed (${scope})`, {
+      ...context,
+      error: error?.message || error,
+    });
+  }
+
   function buildInviteCommand(commandName) {
     return new SlashCommandBuilder()
       .setName(commandName)
@@ -181,8 +203,8 @@ function createInvitationsService({ pool }) {
     );
   }
 
-  async function ensureStatRow(guildId, userId) {
-    await pool.query(
+  async function ensureStatRow(guildId, userId, db = pool) {
+    await db.query(
       `INSERT INTO invite_stats (guild_id, user_id)
        VALUES ($1, $2)
        ON CONFLICT (guild_id, user_id) DO NOTHING`,
@@ -190,8 +212,8 @@ function createInvitationsService({ pool }) {
     );
   }
 
-  async function recomputeTotal(guildId, userId) {
-    const res = await pool.query(
+  async function recomputeTotal(guildId, userId, db = pool) {
+    const res = await db.query(
       `UPDATE invite_stats
        SET total = GREATEST(0, regular - left_count + bonus),
            updated_at = NOW()
@@ -327,26 +349,27 @@ function createInvitationsService({ pool }) {
     const isFake = accountAgeMs < minDays * 24 * 60 * 60 * 1000;
 
     let stat = null;
-    await pool.query('BEGIN');
     try {
-      await pool.query(
-        `INSERT INTO invite_joins (guild_id, user_id, inviter_id, invite_code, is_fake, is_ambiguous)
-         VALUES ($1, $2, $3, $4, $5, $6)
-         ON CONFLICT (guild_id, user_id)
-         DO UPDATE SET
-           inviter_id=EXCLUDED.inviter_id,
-           invite_code=EXCLUDED.invite_code,
-           is_fake=EXCLUDED.is_fake,
-           is_ambiguous=EXCLUDED.is_ambiguous,
-           joined_at=NOW(),
-           left_at=NULL,
-           status='joined'`,
-        [guild.id, member.id, inviterId, invite?.code || null, isFake, isAmbiguous]
-      );
+      stat = await withTransaction(async (db) => {
+        await db.query(
+          `INSERT INTO invite_joins (guild_id, user_id, inviter_id, invite_code, is_fake, is_ambiguous)
+           VALUES ($1, $2, $3, $4, $5, $6)
+           ON CONFLICT (guild_id, user_id)
+           DO UPDATE SET
+             inviter_id=EXCLUDED.inviter_id,
+             invite_code=EXCLUDED.invite_code,
+             is_fake=EXCLUDED.is_fake,
+             is_ambiguous=EXCLUDED.is_ambiguous,
+             joined_at=NOW(),
+             left_at=NULL,
+             status='joined'`,
+          [guild.id, member.id, inviterId, invite?.code || null, isFake, isAmbiguous]
+        );
 
-      if (inviterId) {
-        await ensureStatRow(guild.id, inviterId);
-        await pool.query(
+        if (!inviterId) return null;
+
+        await ensureStatRow(guild.id, inviterId, db);
+        await db.query(
           `UPDATE invite_stats
            SET regular = regular + CASE WHEN $3 THEN 0 ELSE 1 END,
                fake = fake + CASE WHEN $3 THEN 1 ELSE 0 END,
@@ -354,11 +377,10 @@ function createInvitationsService({ pool }) {
            WHERE guild_id=$1 AND user_id=$2`,
           [guild.id, inviterId, isFake]
         );
-        stat = await recomputeTotal(guild.id, inviterId);
-      }
-      await pool.query('COMMIT');
+        return recomputeTotal(guild.id, inviterId, db);
+      });
     } catch (e) {
-      await pool.query('ROLLBACK').catch(() => {});
+      logTransactionError('handleGuildMemberAdd', { guildId: guild.id, memberId: member.id }, e);
       throw e;
     }
 
@@ -398,38 +420,44 @@ function createInvitationsService({ pool }) {
 
     let inviterId = null;
     let stat = null;
-    await pool.query('BEGIN');
     try {
-      const res = await pool.query(
-        `SELECT inviter_id
-         FROM invite_joins
-         WHERE guild_id=$1 AND user_id=$2 AND status='joined'
-         LIMIT 1`,
-        [guild.id, member.id]
-      );
-      inviterId = res.rows[0]?.inviter_id || null;
+      const txResult = await withTransaction(async (db) => {
+        const res = await db.query(
+          `SELECT inviter_id
+           FROM invite_joins
+           WHERE guild_id=$1 AND user_id=$2 AND status='joined'
+           LIMIT 1`,
+          [guild.id, member.id]
+        );
+        const txInviterId = res.rows[0]?.inviter_id || null;
 
-      await pool.query(
-        `UPDATE invite_joins
-         SET status='left', left_at=NOW()
-         WHERE guild_id=$1 AND user_id=$2 AND status='joined'`,
-        [guild.id, member.id]
-      );
+        await db.query(
+          `UPDATE invite_joins
+           SET status='left', left_at=NOW()
+           WHERE guild_id=$1 AND user_id=$2 AND status='joined'`,
+          [guild.id, member.id]
+        );
 
-      if (inviterId) {
-        await ensureStatRow(guild.id, inviterId);
-        await pool.query(
+        if (!txInviterId) {
+          return { inviterId: null, stat: null };
+        }
+
+        await ensureStatRow(guild.id, txInviterId, db);
+        await db.query(
           `UPDATE invite_stats
            SET left_count = left_count + 1,
                updated_at = NOW()
            WHERE guild_id=$1 AND user_id=$2`,
-          [guild.id, inviterId]
+          [guild.id, txInviterId]
         );
-        stat = await recomputeTotal(guild.id, inviterId);
-      }
-      await pool.query('COMMIT');
+        const txStat = await recomputeTotal(guild.id, txInviterId, db);
+        return { inviterId: txInviterId, stat: txStat };
+      });
+
+      inviterId = txResult.inviterId;
+      stat = txResult.stat;
     } catch (e) {
-      await pool.query('ROLLBACK').catch(() => {});
+      logTransactionError('handleGuildMemberRemove', { guildId: guild.id, memberId: member.id }, e);
       throw e;
     }
 
