@@ -22,6 +22,7 @@ const { createWelcomeService } = require('./welcome');
 const { createServerStatsService } = require('./serverstats');
 const { createWorlService } = require('./worl');
 const { createHelpService } = require('./help');
+const { createPingService } = require('./ping');
 
 const logger = createLogger();
 
@@ -39,6 +40,7 @@ const client = new Client({
   intents: buildIntents(config),
 });
 
+const ping = createPingService();
 const rankup = createRankupService({ pool, config });
 const vouches = createVouchesService({ pool, config, rankup });
 const modrank = createModrankService({ pool, config });
@@ -56,6 +58,7 @@ const worl = createWorlService({ pool, config });
 
 const help = createHelpService({
   services: {
+    ping,
     vouches,
     rankup,
     modrank,
@@ -74,6 +77,7 @@ const help = createHelpService({
 });
 
 const services = {
+  ping,
   help,
   vouches,
   rankup,

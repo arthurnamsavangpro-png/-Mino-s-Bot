@@ -1,8 +1,8 @@
-const { REST, Routes, SlashCommandBuilder } = require('discord.js');
+const { REST, Routes } = require('discord.js');
 
 function buildCommandsPayload(services) {
   const commands = [
-    new SlashCommandBuilder().setName('ping').setDescription('Répond pong + latence'),
+    ...services.ping.commands,
     ...services.help.commands,
     ...services.vouches.commands,
     ...services.rankup.commands,

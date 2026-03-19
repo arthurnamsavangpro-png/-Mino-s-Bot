@@ -15,6 +15,7 @@ function mkService(commandNames = [], result = false, marker = []) {
 
 function makeServices(marker, overrides = {}) {
   return {
+    ping: mkService(['ping'], false, marker),
     help: mkService(['help'], false, marker),
     tickets: mkService(['ticket-panel'], false, marker),
     sendMessage: mkService(['send-message'], false, marker),
@@ -70,7 +71,7 @@ test('dispatchInteraction runs fallback chain for unknown slash command', async 
   const handled = await router.dispatchInteraction(interaction, {});
 
   assert.equal(handled, false);
-  assert.equal(marker.length, 15);
+  assert.equal(marker.length, 16);
 });
 
 test('dispatchInteraction supports non-slash interactions', async () => {
@@ -106,7 +107,7 @@ test('dispatchInteraction ignores invalid scoped service and falls back safely',
   const handled = await router.dispatchInteraction(interaction, {});
 
   assert.equal(handled, false);
-  assert.equal(marker.length, 14);
+  assert.equal(marker.length, 15);
 });
 
 test('createInteractionRouter exposes duplicate command handlers metadata', () => {

@@ -1,5 +1,6 @@
 function createInteractionRouter(services) {
   const orderedEntries = [
+    ['ping', services.ping],
     ['help', services.help],
     ['tickets', services.tickets],
     ['sendMessage', services.sendMessage],

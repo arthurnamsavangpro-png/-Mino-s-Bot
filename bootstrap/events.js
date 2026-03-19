@@ -47,13 +47,6 @@ function registerClientEvents({ client, services, logger }) {
       if (await interactionRouter.dispatchInteraction(interaction, client)) return;
 
       if (!isSlash) return;
-
-      if (interaction.commandName === 'ping') {
-        const sent = await interaction.reply({ content: 'pong ', fetchReply: true });
-        const latency = sent.createdTimestamp - interaction.createdTimestamp;
-        await interaction.editReply(`pong (latence: ${latency}ms)`);
-        return;
-      }
     } catch (e) {
       logger.error({ ...baseContext, event: 'interaction_error', error: e?.message || e });
       if (interaction?.isRepliable?.()) {
