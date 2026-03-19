@@ -18,23 +18,6 @@ function registerProcessSignals({ gracefulShutdown, logger }) {
 }
 
 function registerClientEvents({ client, services, logger }) {
-  const {
-    help,
-    tickets,
-    sendMessage,
-    giveaways,
-    automod,
-    updates,
-    absence,
-    invitations,
-    welcome,
-    serverstats,
-    worl,
-    moderation,
-    vouches,
-    rankup,
-    modrank,
-  } = services;
   const interactionRouter = createInteractionRouter(services);
 
   client.on('interactionCreate', async (interaction) => {
