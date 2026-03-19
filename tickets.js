@@ -384,7 +384,11 @@ function buildTicketChannelName({ claimed, username, categoryLabel }) {
 async function tryRenameTicketChannel(channel, newName) {
   if (!channel || !channel.setName) return;
   if (!newName || channel.name === newName) return;
-  await channel.setName(newName).catch(() => {});
+  const renamePromise = channel.setName(newName).catch(() => null);
+  await Promise.race([
+    renamePromise,
+    new Promise((resolve) => setTimeout(resolve, 1500)),
+  ]);
 }
 
 /* ---------------- Premium UI Helpers ---------------- */
@@ -429,8 +433,10 @@ function buildTopBannerEmbed(banner) {
 
 /* ---------------- Ticket UI ---------------- */
 
-function buildTicketEmbed({ openerId, categoryLabel, ticketId, claimedBy, subject, details, guild }) {
-  const priseEnCharge = claimedBy ? `<@${claimedBy}>` : "Non pris en charge.";
+function buildTicketEmbed({ openerId, categoryLabel, ticketId, claimedBy, claimedHelpers, subject, details, guild }) {
+  const helpers = Array.isArray(claimedHelpers) ? claimedHelpers.filter((x) => typeof x === "string" && x) : [];
+  const mentions = Array.from(new Set([claimedBy, ...helpers].filter(Boolean))).map((id) => `<@${id}>`);
+  const priseEnCharge = mentions.length ? mentions.join(", ") : "Non pris en charge.";
 
   const e = new EmbedBuilder()
     .setColor(premiumColor())
@@ -455,7 +461,11 @@ function buildTicketEmbed({ openerId, categoryLabel, ticketId, claimedBy, subjec
 
 function buildTicketControls(ticketId, isClaimed) {
   const claimBtn = isClaimed
-    ? new ButtonBuilder().setCustomId(`ticket:claim:${ticketId}`).setLabel("Unclaim").setStyle(ButtonStyle.Danger)
+    ? new ButtonBuilder()
+        .setCustomId(`ticket:claim:${ticketId}`)
+        .setLabel("Claimé")
+        .setStyle(ButtonStyle.Secondary)
+        .setDisabled(true)
     : new ButtonBuilder().setCustomId(`ticket:claim:${ticketId}`).setLabel("Claim").setStyle(ButtonStyle.Success);
 
   return new ActionRowBuilder().addComponents(
@@ -645,6 +655,7 @@ function createTicketsService({ pool, config }) {
     try {
       await pool.query(`ALTER TABLE tickets ADD COLUMN IF NOT EXISTS subject TEXT;`);
       await pool.query(`ALTER TABLE tickets ADD COLUMN IF NOT EXISTS details TEXT;`);
+      await pool.query(`ALTER TABLE tickets ADD COLUMN IF NOT EXISTS claimed_helpers TEXT[];`);
     } catch {}
   }
 
@@ -978,6 +989,7 @@ function createTicketsService({ pool, config }) {
       categoryLabel: reason,
       ticketId,
       claimedBy: null,
+      claimedHelpers: [],
       subject,
       details,
       guild,
@@ -1000,20 +1012,45 @@ function createTicketsService({ pool, config }) {
   async function getTicket(ticketId) {
     const res = await pool
       .query(
-        `SELECT ticket_id, guild_id, channel_id, opener_id, status, claimed_by, category_label, created_at, closed_at,
+        `SELECT ticket_id, guild_id, channel_id, opener_id, status, claimed_by, claimed_helpers, category_label, created_at, closed_at,
                 subject, details
          FROM tickets WHERE ticket_id=$1 LIMIT 1`,
         [ticketId]
       )
       .catch(async () => {
         const r2 = await pool.query(
-          `SELECT ticket_id, guild_id, channel_id, opener_id, status, claimed_by, category_label, created_at, closed_at
+          `SELECT ticket_id, guild_id, channel_id, opener_id, status, claimed_by, claimed_helpers, category_label, created_at, closed_at
            FROM tickets WHERE ticket_id=$1 LIMIT 1`,
           [ticketId]
         );
         return r2;
       });
     return res.rows[0] || null;
+  }
+
+  async function getOpenTicketByChannel(channelId) {
+    const res = await pool.query(
+      `SELECT ticket_id, guild_id, channel_id, opener_id, status, claimed_by, claimed_helpers, category_label, created_at, closed_at,
+              subject, details
+       FROM tickets
+       WHERE channel_id=$1 AND status='open'
+       ORDER BY created_at DESC
+       LIMIT 1`,
+      [channelId]
+    );
+    return res.rows[0] || null;
+  }
+
+  async function findTicketRootMessage(channel, ticketId) {
+    if (!channel?.isTextBased?.() || !ticketId) return null;
+    const recent = await channel.messages.fetch({ limit: 50 }).catch(() => null);
+    if (!recent?.size) return null;
+    return (
+      recent.find((m) => {
+        const footer = m.embeds?.[0]?.footer?.text || "";
+        return footer.includes(`Ticket ID: ${ticketId}`) && Array.isArray(m.components) && m.components.length > 0;
+      }) || null
+    );
   }
 
   async function getPanel(panelId) {
@@ -1073,7 +1110,14 @@ function createTicketsService({ pool, config }) {
   /* ---------------- Actions (claim/close/delete/transcript/feedback/stats) ---------------- */
 
   async function doClaim(interaction, ticketId) {
-    const release = await acquireTicketLock(ticketId);
+    let release = () => {};
+    try {
+      release = await acquireTicketLock(ticketId, 30000);
+    } catch {
+      await safeFollowUpEphemeral(interaction, { content: "⚠️ Action claim en attente, réessaie dans quelques secondes." });
+      return true;
+    }
+
     try {
       const ticket = await getTicket(ticketId);
       if (!ticket) {
@@ -1112,43 +1156,16 @@ function createTicketsService({ pool, config }) {
           });
           return true;
         }
-        publicMsg = `✅ Ticket pris en charge par <@${interaction.user.id}>.`;
-      } else if (ticket.claimed_by === interaction.user.id) {
-        const upd = await pool.query(
-          `UPDATE tickets SET claimed_by=NULL
-           WHERE ticket_id=$1 AND status='open' AND claimed_by=$2
-           RETURNING claimed_by`,
-          [ticketId, interaction.user.id]
-        );
-
-        if (upd.rowCount === 0) {
-          const latest = await getTicket(ticketId);
-          await safeFollowUpEphemeral(interaction, {
-            content: latest?.claimed_by
-              ? `⚠️ Déjà pris en charge par <@${latest.claimed_by}>.`
-              : "⚠️ Déjà non pris en charge.",
-          });
-          return true;
-        }
-        publicMsg = `🟥 Ticket n'est plus pris en charge.`;
+        publicMsg = `<:greentick:1484036660030078977> **Ticket pris en charge** par <@${interaction.user.id}>.`;
       } else {
-        if (!isAdm) {
+        if (!isAdm && ticket.claimed_by !== interaction.user.id) {
           await safeFollowUpEphemeral(interaction, { content: `⚠️ Déjà pris en charge par <@${ticket.claimed_by}>.` });
           return true;
         }
-
-        const upd = await pool.query(
-          `UPDATE tickets SET claimed_by=NULL
-           WHERE ticket_id=$1 AND status='open' AND claimed_by IS NOT NULL
-           RETURNING claimed_by`,
-          [ticketId]
-        );
-
-        if (upd.rowCount === 0) {
-          await safeFollowUpEphemeral(interaction, { content: "⚠️ Déjà non pris en charge." });
-          return true;
-        }
-        publicMsg = `🟥 Ticket n'est plus pris en charge (action admin).`;
+        await safeFollowUpEphemeral(interaction, {
+          content: `<:redtick:1484036135876431903> Ce ticket est déjà pris en charge par <@${ticket.claimed_by}>.\n💡 Utilise \`+claim\` pour te rajouter dans la prise en charge.`,
+        });
+        return true;
       }
 
       const finalTicket = await getTicket(ticketId);
@@ -1162,6 +1179,7 @@ function createTicketsService({ pool, config }) {
         categoryLabel: finalTicket.category_label || "Support",
         ticketId,
         claimedBy: finalTicket.claimed_by || null,
+        claimedHelpers: finalTicket.claimed_helpers || [],
         subject: finalTicket.subject || null,
         details: finalTicket.details || null,
         guild: interaction.guild,
@@ -3390,7 +3408,127 @@ function createTicketsService({ pool, config }) {
     return false;
   }
 
-  return { commands, handleInteraction };
+  async function handleMessage(message) {
+    if (!message || message.author?.bot) return false;
+    if (!message.guild || !message.member) return false;
+
+    const content = String(message.content || "").trim();
+    if (!content.startsWith("+")) return false;
+
+    const parts = content.slice(1).trim().split(/\s+/);
+    const cmd = (parts.shift() || "").toLowerCase();
+
+    if (cmd !== "claim" && cmd !== "add") return false;
+
+    const settings = await getSettings(message.guild.id);
+    const isStaffMember =
+      message.member.permissions.has(PermissionsBitField.Flags.Administrator) ||
+      getStaffRoleIds(settings).some((roleId) => Boolean(message.member.roles?.cache?.has?.(roleId)));
+
+    if (!isStaffMember) {
+      await message.reply("<:redtick:1484036135876431903> **Staff/Admin uniquement.**");
+      return true;
+    }
+
+    const ticket = await getOpenTicketByChannel(message.channel.id);
+    if (!ticket) {
+      await message.reply("<:redtick:1484036135876431903> Cette commande doit être utilisée dans un ticket ouvert.");
+      return true;
+    }
+
+    if (cmd === "add") {
+      const target = message.mentions.users.first();
+      if (!target) {
+        await message.reply("<:ticket_1:1483662269966716949> Utilisation: `+add @membre`");
+        return true;
+      }
+
+      await message.channel.permissionOverwrites
+        .edit(target.id, {
+          ViewChannel: true,
+          SendMessages: true,
+          ReadMessageHistory: true,
+          AttachFiles: true,
+          EmbedLinks: true,
+        })
+        .catch(() => null);
+
+      await message.reply(
+        `<:greentick:1484036660030078977> <@${target.id}> a été ajouté au ticket par <@${message.author.id}>.`
+      );
+      return true;
+    }
+
+    const mentionTarget = message.mentions.users.first() || null;
+    const target = mentionTarget || message.author;
+
+    if (!ticket.claimed_by) {
+      const upd = await pool.query(
+        `UPDATE tickets SET claimed_by=$2
+         WHERE ticket_id=$1 AND status='open' AND claimed_by IS NULL
+         RETURNING claimed_by`,
+        [ticket.ticket_id, target.id]
+      );
+      if (upd.rowCount === 0) {
+        const latest = await getTicket(ticket.ticket_id);
+        await message.reply(
+          latest?.claimed_by
+            ? `<:redtick:1484036135876431903> Déjà pris en charge par <@${latest.claimed_by}>.`
+            : "<:redtick:1484036135876431903> Impossible de claim pour le moment, réessaie."
+        );
+        return true;
+      }
+    } else if (ticket.claimed_by !== target.id) {
+      await pool.query(
+        `UPDATE tickets
+         SET claimed_helpers = CASE
+           WHEN claimed_helpers IS NULL THEN ARRAY[$2]::TEXT[]
+           WHEN NOT ($2 = ANY(claimed_helpers)) THEN claimed_helpers || $2
+           ELSE claimed_helpers
+         END
+         WHERE ticket_id=$1 AND status='open'`,
+        [ticket.ticket_id, target.id]
+      );
+    }
+
+    const finalTicket = await getTicket(ticket.ticket_id);
+    if (finalTicket) {
+      const rootMsg = await findTicketRootMessage(message.channel, ticket.ticket_id);
+      if (rootMsg?.edit) {
+        const embed = buildTicketEmbed({
+          openerId: finalTicket.opener_id,
+          categoryLabel: finalTicket.category_label || "Support",
+          ticketId: ticket.ticket_id,
+          claimedBy: finalTicket.claimed_by || null,
+          claimedHelpers: finalTicket.claimed_helpers || [],
+          subject: finalTicket.subject || null,
+          details: finalTicket.details || null,
+          guild: message.guild,
+        });
+        const controls = buildTicketControls(ticket.ticket_id, Boolean(finalTicket.claimed_by));
+        await rootMsg.edit({ embeds: [embed], components: [controls] }).catch(() => null);
+      }
+
+      await applyClaimExclusive(message.channel, settings, finalTicket.claimed_by || null);
+      if (finalTicket.claimed_by && finalTicket.claimed_by !== target.id) {
+        await message.channel.permissionOverwrites
+          .edit(target.id, { ViewChannel: true, SendMessages: true, ReadMessageHistory: true })
+          .catch(() => null);
+      }
+      const uname = await fetchUsernameSafe(message.client, finalTicket.claimed_by);
+      await tryRenameTicketChannel(
+        message.channel,
+        buildTicketChannelName({ claimed: true, username: uname, categoryLabel: finalTicket.category_label || "Support" })
+      );
+    }
+
+    await message.reply(
+      `<:greentick:1484036660030078977> **Prise en charge mise à jour**\n• Action par : <@${message.author.id}>\n• Assigné à : <@${target.id}>`
+    );
+    return true;
+  }
+
+  return { commands, handleInteraction, handleMessage };
 }
 
 module.exports = { createTicketsService };
