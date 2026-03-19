@@ -19,6 +19,7 @@ function createServerStatsService({ pool }) {
   const PANEL_CANCEL_ID = "serverstats:panel:cancel";
 
   const panelStates = new Map();
+  const presenceRefreshCooldown = new Map();
 
   const AVAILABLE_METRICS = {
     members: {
@@ -252,6 +253,18 @@ function createServerStatsService({ pool }) {
       }
     }
     return true;
+  }
+
+  async function handlePresenceUpdate(presence) {
+    const guild = presence?.guild;
+    if (!guild) return;
+
+    const now = Date.now();
+    const last = presenceRefreshCooldown.get(guild.id) || 0;
+    if (now - last < 15_000) return;
+
+    presenceRefreshCooldown.set(guild.id, now);
+    await refreshGuildStats(guild).catch(() => {});
   }
 
   async function refreshAll(client) {
@@ -561,6 +574,7 @@ function createServerStatsService({ pool }) {
     commands,
     handleInteraction,
     refreshGuildStats,
+    handlePresenceUpdate,
     startScheduler,
     ensureTable,
   };
