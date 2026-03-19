@@ -312,7 +312,7 @@ function createStartNewServerService({ pool }) {
         [
           guildId,
           JSON.stringify({
-            enabled: true,
+            enabled: false,
             mode: 'soft',
             log_channel_id: logsMod?.id || null,
             anti_join: { enabled: true, action: 'timeout' },
@@ -328,7 +328,11 @@ function createStartNewServerService({ pool }) {
           }),
         ]
       )
-      .then(() => report.ok.push('AutoMod activé en mode soft (admin-raid laissé OFF pour éviter l’auto-kick).'))
+      .then(() =>
+        report.ok.push(
+          'AutoMod configuré mais désactivé totalement pour éviter tout kick auto pendant/après le setup.'
+        )
+      )
       .catch(() => report.warnings.push('Configuration DB AutoMod échouée.'));
 
     let statsCategory = guild.channels.cache.find(
