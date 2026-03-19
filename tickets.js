@@ -477,7 +477,7 @@ function setPanelDraft(guildId, userId, value) {
 
 /* ---------------- Service ---------------- */
 
-function createTicketsService({ pool, config }) {
+function createTicketsService({ pool, config, logger }) {
   /* ---------------- Slash commands ---------------- */
 
   // /ticket-panel is now PREMIUM builder by default.
@@ -591,7 +591,7 @@ function createTicketsService({ pool, config }) {
 
   /* ---------------- Settings ---------------- */
 
-  const ticketSettingsRepository = createTicketSettingsRepository({ pool, config });
+  const ticketSettingsRepository = createTicketSettingsRepository({ pool, config, logger });
   const { ensureExtraColumns, getSettings, upsertSettings, getStaffRoleIds, formatStaffRolesMention } =
     ticketSettingsRepository;
 

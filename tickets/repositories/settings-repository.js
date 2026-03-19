@@ -2,7 +2,20 @@ function clampNumber(value, min, max) {
   return Math.min(max, Math.max(min, value));
 }
 
-function createTicketSettingsRepository({ pool, config }) {
+function createTicketSettingsRepository({ pool, config, logger }) {
+  function warn(event, error) {
+    const payload = {
+      module: 'tickets',
+      event,
+      error: error?.message || error,
+    };
+    if (logger?.warn) {
+      logger.warn(payload);
+      return;
+    }
+    console.warn(`[tickets] ${event}: ${payload.error}`);
+  }
+
   const DEFAULT_SETTINGS = {
     category_id: config.TICKET_CATEGORY_ID || null,
     staff_role_id: config.TICKET_STAFF_ROLE_ID || null,
@@ -24,7 +37,7 @@ function createTicketSettingsRepository({ pool, config }) {
       await pool.query(`ALTER TABLE tickets ADD COLUMN IF NOT EXISTS details TEXT;`);
       await pool.query(`ALTER TABLE tickets ADD COLUMN IF NOT EXISTS claimed_helpers TEXT[];`);
     } catch (error) {
-      console.warn(`[tickets] ensureExtraColumns failed: ${error?.message || error}`);
+      warn('ensure_extra_columns_failed', error);
     }
   }
 
@@ -35,7 +48,7 @@ function createTicketSettingsRepository({ pool, config }) {
     try {
       await pool.query(`ALTER TABLE ticket_settings ADD COLUMN IF NOT EXISTS staff_role_ids TEXT[];`);
     } catch (error) {
-      console.warn(`[tickets] ensureSettingsColumns failed: ${error?.message || error}`);
+      warn('ensure_settings_columns_failed', error);
     }
   }
 
