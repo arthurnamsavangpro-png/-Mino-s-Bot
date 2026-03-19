@@ -513,6 +513,42 @@ const help = createHelpService({
   },
 });
 
+let presenceInterval = null;
+let isShuttingDown = false;
+
+async function gracefulShutdown(signal) {
+  if (isShuttingDown) return;
+  isShuttingDown = true;
+
+  console.log(`⚠️ Signal ${signal} reçu. Arrêt propre en cours...`);
+  const hardTimeout = setTimeout(() => {
+    console.error("❌ Arrêt propre dépassé (10s). Forçage du process.");
+    process.exit(1);
+  }, 10_000);
+  hardTimeout.unref?.();
+
+  try {
+    if (presenceInterval) {
+      clearInterval(presenceInterval);
+      presenceInterval = null;
+    }
+    vouches.stopGlobalVouchboardUpdater?.();
+    giveaways.stopGlobalGiveawaySweeper?.();
+    serverstats.stopScheduler?.();
+
+    client.destroy();
+    await pool.end();
+
+    clearTimeout(hardTimeout);
+    console.log("✅ Arrêt propre terminé.");
+    process.exit(0);
+  } catch (err) {
+    clearTimeout(hardTimeout);
+    console.error("❌ Échec pendant l'arrêt propre:", err);
+    process.exit(1);
+  }
+}
+
 /* ----------------------------- Slash commands deployment ------------------------------ */
 async function registerCommands() {
   const commands = [
@@ -614,7 +650,7 @@ client.once("clientReady", async () => {
   };
 
   updatePresence(); // 🔥 direct
-  setInterval(updatePresence, 15_000); // toutes les 15s
+  presenceInterval = setInterval(updatePresence, 15_000); // toutes les 15s
 
   try {
     await initDb();
@@ -643,6 +679,18 @@ client.once("clientReady", async () => {
 /* ----------------------------- Logs globaux utiles ------------------------------ */
 process.on("unhandledRejection", (err) => console.error("unhandledRejection:", err));
 process.on("uncaughtException", (err) => console.error("uncaughtException:", err));
+process.on("SIGINT", () => {
+  gracefulShutdown("SIGINT").catch((err) => {
+    console.error("SIGINT shutdown fatal:", err);
+    process.exit(1);
+  });
+});
+process.on("SIGTERM", () => {
+  gracefulShutdown("SIGTERM").catch((err) => {
+    console.error("SIGTERM shutdown fatal:", err);
+    process.exit(1);
+  });
+});
 
 /* ----------------------------- Interactions ------------------------------ */
 client.on("interactionCreate", async (interaction) => {
