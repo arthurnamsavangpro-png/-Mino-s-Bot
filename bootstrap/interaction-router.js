@@ -31,16 +31,18 @@ function createInteractionRouter(services) {
     if (interaction.isChatInputCommand()) {
       const scopedServices = commandMap.get(interaction.commandName) || [];
 
-      for (const service of scopedServices) {
-        if (await service.handleInteraction(interaction, client)) return true;
+      // Routage explicite: si la commande est connue, on n'interroge que ses handlers.
+      if (scopedServices.length) {
+        for (const service of scopedServices) {
+          if (await service.handleInteraction(interaction, client)) return true;
+        }
+        return false;
       }
 
-      // Fallback sécurité (legacy path) pour éviter toute régression de routing.
+      // Fallback uniquement pour commandes inconnues (compat/legacy).
       for (const service of orderedServices) {
-        if (scopedServices.includes(service)) continue;
         if (await service.handleInteraction(interaction, client)) return true;
       }
-
       return false;
     }
 

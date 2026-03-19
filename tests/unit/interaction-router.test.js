@@ -49,6 +49,20 @@ test('dispatchInteraction routes slash command to scoped service first', async (
 
 test('dispatchInteraction runs fallback chain when scoped handler does not handle', async () => {
   const marker = [];
+  const services = makeServices(marker, {
+    tickets: mkService(['ticket-panel'], false, marker),
+  });
+  const router = createInteractionRouter(services);
+
+  const interaction = { isChatInputCommand: () => true, commandName: 'ticket-panel' };
+  const handled = await router.dispatchInteraction(interaction, {});
+
+  assert.equal(handled, false);
+  assert.equal(marker.length, 1);
+});
+
+test('dispatchInteraction runs fallback chain for unknown slash command', async () => {
+  const marker = [];
   const services = makeServices(marker);
   const router = createInteractionRouter(services);
 
