@@ -23,6 +23,7 @@ const { createServerStatsService } = require('./serverstats');
 const { createWorlService } = require('./worl');
 const { createHelpService } = require('./help');
 const { createPingService } = require('./ping');
+const { createStartNewServerService } = require('./startnewserver');
 
 const logger = createLogger();
 
@@ -41,6 +42,7 @@ const client = new Client({
 });
 
 const ping = createPingService();
+const startnewserver = createStartNewServerService();
 const rankup = createRankupService({ pool, config });
 const vouches = createVouchesService({ pool, config, rankup });
 const modrank = createModrankService({ pool, config });
@@ -59,6 +61,7 @@ const worl = createWorlService({ pool, config });
 const help = createHelpService({
   services: {
     ping,
+    startnewserver,
     vouches,
     rankup,
     modrank,
@@ -78,6 +81,7 @@ const help = createHelpService({
 
 const services = {
   ping,
+  startnewserver,
   help,
   vouches,
   rankup,

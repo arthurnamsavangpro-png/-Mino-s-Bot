@@ -2,6 +2,7 @@ const { REST, Routes } = require('discord.js');
 
 const SERVICE_COMMAND_ORDER = [
   'ping',
+  'startnewserver',
   'help',
   'vouches',
   'rankup',
