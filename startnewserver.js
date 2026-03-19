@@ -152,6 +152,48 @@ function createStartNewServerService({ pool }) {
     });
   }
 
+  function buildPrivateOverwrites(guild) {
+    const botId = guild.members.me?.id || guild.client.user?.id;
+    const overwrites = [
+      {
+        id: guild.roles.everyone.id,
+        deny: [PermissionFlagsBits.ViewChannel],
+      },
+    ];
+    if (botId) {
+      overwrites.push({
+        id: botId,
+        allow: [
+          PermissionFlagsBits.ViewChannel,
+          PermissionFlagsBits.SendMessages,
+          PermissionFlagsBits.ReadMessageHistory,
+          PermissionFlagsBits.ManageChannels,
+        ],
+      });
+    }
+    return overwrites;
+  }
+
+  async function ensurePrivateCategory(guild, name) {
+    const existing = guild.channels.cache.find(
+      (ch) => ch.type === ChannelType.GuildCategory && ch.name === name
+    );
+    if (existing) {
+      await existing.permissionOverwrites.set(buildPrivateOverwrites(guild)).catch(() => {});
+      return existing;
+    }
+    return guild.channels.create({
+      name,
+      type: ChannelType.GuildCategory,
+      permissionOverwrites: buildPrivateOverwrites(guild),
+    });
+  }
+
+  async function makeChannelPrivate(channel, guild) {
+    if (!channel) return;
+    await channel.permissionOverwrites.set(buildPrivateOverwrites(guild)).catch(() => {});
+  }
+
   async function ensureVoiceChannel(guild, name, parentId) {
     const existing = guild.channels.cache.find(
       (ch) => ch.type === ChannelType.GuildVoice && ch.name === name
@@ -213,15 +255,8 @@ function createStartNewServerService({ pool }) {
       .then(() => report.ok.push('AutoMod mis en pause temporaire pendant le setup.'))
       .catch(() => report.warnings.push('Impossible de mettre AutoMod en pause avant setup.'));
 
-    let setupCategory = guild.channels.cache.find(
-      (ch) => ch.type === ChannelType.GuildCategory && ch.name === '🤖・mino-setup'
-    );
-    if (!setupCategory) {
-      setupCategory = await guild.channels
-        .create({ name: '🤖・mino-setup', type: ChannelType.GuildCategory })
-        .catch(() => null);
-    }
-    if (!setupCategory) report.warnings.push('Impossible de créer la catégorie setup (permissions).');
+    let logsCategory = await ensurePrivateCategory(guild, '📁・logs').catch(() => null);
+    if (!logsCategory) report.warnings.push('Impossible de créer la catégorie logs (permissions).');
 
     let supportCategory = guild.channels.cache.find(
       (ch) => ch.type === ChannelType.GuildCategory && ch.name === '🎫・support'
@@ -256,37 +291,37 @@ function createStartNewServerService({ pool }) {
     const logsMod = await ensureTextChannel(
       guild,
       'logs-moderation',
-      setupCategory?.id || null,
+      logsCategory?.id || null,
       'Logs modération du bot'
     ).catch(() => null);
     const logsInvites = await ensureTextChannel(
       guild,
       'logs-invitations',
-      setupCategory?.id || null,
+      logsCategory?.id || null,
       'Logs invitations du bot'
     ).catch(() => null);
     const announceInvites = await ensureTextChannel(
       guild,
       'annonces-invitations',
-      setupCategory?.id || null,
+      logsCategory?.id || null,
       'Annonces nouveaux membres'
     ).catch(() => null);
     const welcomeChannel = await ensureTextChannel(
       guild,
       'bienvenue',
-      communityCategory?.id || setupCategory?.id || null,
+      communityCategory?.id || logsCategory?.id || null,
       'Messages de bienvenue auto'
     ).catch(() => null);
     const updatesChannel = await ensureTextChannel(
       guild,
       'annonces-bot',
-      communityCategory?.id || setupCategory?.id || null,
+      communityCategory?.id || logsCategory?.id || null,
       'Mises à jour et annonces bot'
     ).catch(() => null);
     const vouchesChannel = await ensureTextChannel(
       guild,
       'vouches',
-      communityCategory?.id || setupCategory?.id || null,
+      communityCategory?.id || logsCategory?.id || null,
       'Canal pour les feedbacks/vouches'
     ).catch(() => null);
     const ticketsPanelChannel = await ensureTextChannel(
@@ -298,15 +333,16 @@ function createStartNewServerService({ pool }) {
     const ticketsLogsChannel = await ensureTextChannel(
       guild,
       'tickets-logs',
-      supportCategory?.id || setupCategory?.id || null,
+      logsCategory?.id || supportCategory?.id || null,
       'Logs/transcripts tickets'
     ).catch(() => null);
     const absenceLogsChannel = await ensureTextChannel(
       guild,
       'absence-logs',
-      setupCategory?.id || null,
+      logsCategory?.id || null,
       'Demandes et validations absences'
     ).catch(() => null);
+    await makeChannelPrivate(ticketsLogsChannel, guild);
 
     if (logsMod) report.ok.push(`Salon logs modération: ${logsMod}.`);
     else report.warnings.push('Salon `logs-moderation` non créé.');
@@ -499,19 +535,19 @@ function createStartNewServerService({ pool }) {
       .catch(() => report.warnings.push('Configuration DB AutoMod échouée.'));
 
     let statsCategory = guild.channels.cache.find(
-      (ch) => ch.type === ChannelType.GuildCategory && ch.name === '📊・stats-serveur'
+      (ch) => ch.type === ChannelType.GuildCategory && ch.name === '📊・SERVER STATS'
     );
     if (!statsCategory) {
       statsCategory = await guild.channels
-        .create({ name: '📊・stats-serveur', type: ChannelType.GuildCategory })
+        .create({ name: '📊・SERVER STATS', type: ChannelType.GuildCategory })
         .catch(() => null);
     }
     const membersCount = guild.memberCount || guild.members.cache.size || 0;
     const botsCount = guild.members.cache.filter((m) => m.user?.bot).size;
     const onlineCount = guild.members.cache.filter((m) => m.presence?.status && m.presence.status !== 'offline').size;
-    const membersVc = await ensureVoiceChannel(guild, `👤 | Members: ${membersCount}`, statsCategory?.id).catch(() => null);
-    const botsVc = await ensureVoiceChannel(guild, `🤖 | Bots: ${botsCount}`, statsCategory?.id).catch(() => null);
-    const onlineVc = await ensureVoiceChannel(guild, `🟢 | Online: ${onlineCount}`, statsCategory?.id).catch(() => null);
+    const membersVc = await ensureVoiceChannel(guild, `👤 | MEMBERS: ${membersCount}`, statsCategory?.id).catch(() => null);
+    const botsVc = await ensureVoiceChannel(guild, `🤖 | BOTS: ${botsCount}`, statsCategory?.id).catch(() => null);
+    const onlineVc = await ensureVoiceChannel(guild, `🟢 | ONLINE: ${onlineCount}`, statsCategory?.id).catch(() => null);
     if (statsCategory && membersVc && botsVc && onlineVc) {
       await pool
         .query(
