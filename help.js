@@ -60,8 +60,8 @@ function createHelpService({ services }) {
       emoji: "🚀",
       label: "Start New Server",
       short: "Setup guidé",
-      description: "Assistant ultra-rapide pour lancer la config initiale d’un serveur Discord.",
-      examples: ["/startnewserver"],
+      description: "Assistant ultra-rapide pour lancer la config initiale d’un serveur Discord (guide ou booster auto).",
+      examples: ["/startnewserver", "/startnewserver mode:booster"],
       serviceKeys: ["startnewserver"],
     },
     {

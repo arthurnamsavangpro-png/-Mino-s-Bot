@@ -6,13 +6,35 @@ const {
   ButtonStyle,
   MessageFlags,
   PermissionsBitField,
+  ChannelType,
+  PermissionFlagsBits,
 } = require('discord.js');
 
-function createStartNewServerService() {
+const DEFAULT_WELCOME_TEMPLATE =
+  '👋 Bienvenue {user} sur **{server}** !\nTu es notre **{member_count}e** membre.\n📘 Lis le règlement puis présente-toi pour démarrer.';
+
+function createStartNewServerService({ pool }) {
   const commands = [
     new SlashCommandBuilder()
       .setName('startnewserver')
-      .setDescription('Assistant de configuration rapide pour un nouveau serveur Discord'),
+      .setDescription('Assistant de configuration rapide pour un nouveau serveur Discord')
+      .addStringOption((opt) =>
+        opt
+          .setName('mode')
+          .setDescription('Guide classique ou mode booster auto')
+          .setRequired(false)
+          .addChoices(
+            { name: 'Guide', value: 'guide' },
+            { name: 'Booster (auto setup)', value: 'booster' }
+          )
+      )
+      .addStringOption((opt) =>
+        opt
+          .setName('welcome_message')
+          .setDescription('Template bienvenue (optionnel en mode booster)')
+          .setRequired(false)
+          .setMaxLength(1900)
+      ),
   ];
 
   function buildMainEmbed(guildName) {
@@ -91,12 +113,265 @@ function createStartNewServerService() {
     );
   }
 
+  function buildBoosterReportEmbed(report) {
+    const done = report.ok.length ? report.ok.map((s) => `✅ ${s}`).join('\n') : '—';
+    const warnings = report.warnings.length ? report.warnings.map((s) => `⚠️ ${s}`).join('\n') : 'Aucun';
+    return new EmbedBuilder()
+      .setColor(0x57f287)
+      .setTitle('🚀 Mode Booster terminé')
+      .setDescription(
+        [
+          'Le bot a appliqué automatiquement une configuration de base.',
+          '',
+          '**Actions appliquées**',
+          done,
+          '',
+          '**Points à vérifier**',
+          warnings,
+          '',
+          'Tu peux maintenant affiner via `/help` ou relancer `/startnewserver mode:guide`.',
+        ].join('\n')
+      );
+  }
+
+  async function ensureTextChannel(guild, name, parentId = null, topic = null) {
+    const existing = guild.channels.cache.find(
+      (ch) => ch.type === ChannelType.GuildText && ch.name === name
+    );
+    if (existing) {
+      if (parentId && existing.parentId !== parentId) {
+        await existing.setParent(parentId).catch(() => {});
+      }
+      return existing;
+    }
+    return guild.channels.create({
+      name,
+      type: ChannelType.GuildText,
+      topic: topic || undefined,
+      parent: parentId || undefined,
+    });
+  }
+
+  async function ensureVoiceChannel(guild, name, parentId) {
+    const existing = guild.channels.cache.find(
+      (ch) => ch.type === ChannelType.GuildVoice && ch.name === name
+    );
+    if (existing) {
+      if (parentId && existing.parentId !== parentId) {
+        await existing.setParent(parentId).catch(() => {});
+      }
+      return existing;
+    }
+    return guild.channels.create({
+      name,
+      type: ChannelType.GuildVoice,
+      parent: parentId || undefined,
+      permissionOverwrites: [
+        {
+          id: guild.roles.everyone.id,
+          deny: [PermissionFlagsBits.Connect, PermissionFlagsBits.Speak],
+        },
+      ],
+    });
+  }
+
+  async function runBoosterSetup(interaction) {
+    const guild = interaction.guild;
+    const guildId = interaction.guildId;
+    const report = { ok: [], warnings: [] };
+    const welcomeTemplate = interaction.options.getString('welcome_message') || DEFAULT_WELCOME_TEMPLATE;
+
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+
+    let setupCategory = guild.channels.cache.find(
+      (ch) => ch.type === ChannelType.GuildCategory && ch.name === '🤖・mino-setup'
+    );
+    if (!setupCategory) {
+      setupCategory = await guild.channels
+        .create({ name: '🤖・mino-setup', type: ChannelType.GuildCategory })
+        .catch(() => null);
+    }
+    if (!setupCategory) report.warnings.push('Impossible de créer la catégorie setup (permissions).');
+
+    const logsMod = await ensureTextChannel(
+      guild,
+      'logs-moderation',
+      setupCategory?.id || null,
+      'Logs modération du bot'
+    ).catch(() => null);
+    const logsInvites = await ensureTextChannel(
+      guild,
+      'logs-invitations',
+      setupCategory?.id || null,
+      'Logs invitations du bot'
+    ).catch(() => null);
+    const announceInvites = await ensureTextChannel(
+      guild,
+      'annonces-invitations',
+      setupCategory?.id || null,
+      'Annonces nouveaux membres'
+    ).catch(() => null);
+    const welcomeChannel = await ensureTextChannel(
+      guild,
+      'bienvenue',
+      setupCategory?.id || null,
+      'Messages de bienvenue auto'
+    ).catch(() => null);
+
+    if (logsMod) report.ok.push(`Salon logs modération: ${logsMod}.`);
+    else report.warnings.push('Salon `logs-moderation` non créé.');
+    if (logsInvites) report.ok.push(`Salon logs invitations: ${logsInvites}.`);
+    else report.warnings.push('Salon `logs-invitations` non créé.');
+    if (announceInvites) report.ok.push(`Salon annonces invitations: ${announceInvites}.`);
+    else report.warnings.push('Salon `annonces-invitations` non créé.');
+    if (welcomeChannel) report.ok.push(`Salon bienvenue: ${welcomeChannel}.`);
+    else report.warnings.push('Salon `bienvenue` non créé.');
+
+    if (logsMod) {
+      await pool
+        .query(
+          `INSERT INTO mod_settings (guild_id, modlog_channel_id, staff_role_id, log_events)
+           VALUES ($1, $2, NULL, $3::jsonb)
+           ON CONFLICT (guild_id) DO UPDATE
+             SET modlog_channel_id = EXCLUDED.modlog_channel_id,
+                 log_events = EXCLUDED.log_events,
+                 updated_at = NOW()`,
+          [
+            guildId,
+            logsMod.id,
+            JSON.stringify({
+              message_delete: true,
+              message_edit: true,
+              member_join: true,
+              member_leave: true,
+              member_ban: true,
+              member_unban: true,
+              member_timeout: true,
+              role_create: true,
+              role_delete: true,
+            }),
+          ]
+        )
+        .then(() => report.ok.push('Logs modération configurés.'))
+        .catch(() => report.warnings.push('Configuration DB des logs modération échouée.'));
+    }
+
+    await pool
+      .query(
+        `INSERT INTO invite_settings (guild_id, log_channel_id, announce_channel_id, fake_min_account_days)
+         VALUES ($1, $2, $3, 7)
+         ON CONFLICT (guild_id) DO UPDATE
+           SET log_channel_id = EXCLUDED.log_channel_id,
+               announce_channel_id = EXCLUDED.announce_channel_id,
+               fake_min_account_days = EXCLUDED.fake_min_account_days,
+               updated_at = NOW()`,
+        [guildId, logsInvites?.id || null, announceInvites?.id || null]
+      )
+      .then(() => report.ok.push('Invitations (logs + annonces) configurées.'))
+      .catch(() => report.warnings.push('Configuration DB des invitations échouée.'));
+
+    await pool
+      .query(
+        `INSERT INTO welcome_settings (guild_id, channel_id, message_template, enabled, updated_at)
+         VALUES ($1, $2, $3, TRUE, NOW())
+         ON CONFLICT (guild_id) DO UPDATE
+           SET channel_id = EXCLUDED.channel_id,
+               message_template = EXCLUDED.message_template,
+               enabled = TRUE,
+               updated_at = NOW()`,
+        [guildId, welcomeChannel?.id || null, welcomeTemplate]
+      )
+      .then(() => report.ok.push('Message de bienvenue activé.'))
+      .catch(() => report.warnings.push('Configuration DB du welcome échouée.'));
+
+    await pool
+      .query(
+        `INSERT INTO automod_settings (guild_id, settings_json, updated_at)
+         VALUES ($1, $2::jsonb, NOW())
+         ON CONFLICT (guild_id) DO UPDATE
+           SET settings_json = EXCLUDED.settings_json,
+               updated_at = NOW()`,
+        [
+          guildId,
+          JSON.stringify({
+            enabled: true,
+            mode: 'soft',
+            log_channel_id: logsMod?.id || null,
+            anti_join: { enabled: true, action: 'timeout' },
+            anti_mention: { enabled: true, action: 'timeout', block_everyone: true },
+            anti_link: { enabled: true, action: 'delete', block_invites: true },
+          }),
+        ]
+      )
+      .then(() => report.ok.push('AutoMod activé en mode soft.'))
+      .catch(() => report.warnings.push('Configuration DB AutoMod échouée.'));
+
+    let statsCategory = guild.channels.cache.find(
+      (ch) => ch.type === ChannelType.GuildCategory && ch.name === '📊・stats-serveur'
+    );
+    if (!statsCategory) {
+      statsCategory = await guild.channels
+        .create({ name: '📊・stats-serveur', type: ChannelType.GuildCategory })
+        .catch(() => null);
+    }
+    const membersCount = guild.memberCount || guild.members.cache.size || 0;
+    const botsCount = guild.members.cache.filter((m) => m.user?.bot).size;
+    const onlineCount = guild.members.cache.filter((m) => m.presence?.status && m.presence.status !== 'offline').size;
+    const membersVc = await ensureVoiceChannel(guild, `👤 | Members: ${membersCount}`, statsCategory?.id).catch(() => null);
+    const botsVc = await ensureVoiceChannel(guild, `🤖 | Bots: ${botsCount}`, statsCategory?.id).catch(() => null);
+    const onlineVc = await ensureVoiceChannel(guild, `🟢 | Online: ${onlineCount}`, statsCategory?.id).catch(() => null);
+    if (statsCategory && membersVc && botsVc && onlineVc) {
+      await pool
+        .query(
+          `INSERT INTO server_stats_settings (
+             guild_id, category_id, members_channel_id, bots_channel_id, metrics, channels, tracked_role_id, enabled, updated_at
+           )
+           VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb, NULL, TRUE, NOW())
+           ON CONFLICT (guild_id) DO UPDATE
+             SET category_id = EXCLUDED.category_id,
+                 members_channel_id = EXCLUDED.members_channel_id,
+                 bots_channel_id = EXCLUDED.bots_channel_id,
+                 metrics = EXCLUDED.metrics,
+                 channels = EXCLUDED.channels,
+                 enabled = TRUE,
+                 updated_at = NOW()`,
+          [
+            guildId,
+            statsCategory.id,
+            membersVc.id,
+            botsVc.id,
+            JSON.stringify(['members', 'bots', 'online']),
+            JSON.stringify({
+              members: membersVc.id,
+              bots: botsVc.id,
+              online: onlineVc.id,
+            }),
+          ]
+        )
+        .then(() => report.ok.push('Server stats de base activées.'))
+        .catch(() => report.warnings.push('Configuration DB server stats échouée.'));
+    } else {
+      report.warnings.push('Server stats partiellement créées (permissions ou salons manquants).');
+    }
+
+    await interaction.editReply({
+      embeds: [buildBoosterReportEmbed(report)],
+      components: [buildActionRow()],
+    });
+  }
+
   async function handleSlash(interaction) {
     if (!interaction.memberPermissions?.has(PermissionsBitField.Flags.ManageGuild)) {
       await interaction.reply({
         content: '❌ Tu dois avoir la permission **Gérer le serveur** pour utiliser cette commande.',
         flags: MessageFlags.Ephemeral,
       });
+      return true;
+    }
+
+    const mode = interaction.options.getString('mode') || 'guide';
+    if (mode === 'booster') {
+      await runBoosterSetup(interaction);
       return true;
     }
 

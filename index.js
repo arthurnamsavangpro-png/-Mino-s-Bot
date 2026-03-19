@@ -42,7 +42,7 @@ const client = new Client({
 });
 
 const ping = createPingService();
-const startnewserver = createStartNewServerService();
+const startnewserver = createStartNewServerService({ pool });
 const rankup = createRankupService({ pool, config });
 const vouches = createVouchesService({ pool, config, rankup });
 const modrank = createModrankService({ pool, config });
