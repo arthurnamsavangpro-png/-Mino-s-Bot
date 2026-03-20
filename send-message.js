@@ -7,10 +7,12 @@ const {
   TextInputBuilder,
   TextInputStyle,
   ActionRowBuilder,
+  ButtonBuilder,
+  ButtonStyle,
   MessageFlags,
 } = require("discord.js");
 
-function createSendMessageService() {
+function createSendMessageService({ config } = {}) {
   const sendCmd = new SlashCommandBuilder()
     .setName("send")
     .setDescription("MOD: Envoie un message texte via le bot")
@@ -77,7 +79,26 @@ function createSendMessageService() {
         .setRequired(false)
     );
 
-  const commands = [sendCmd, sendEmbedCmd];
+  const dmAllCmd = new SlashCommandBuilder()
+    .setName("dm-all")
+    .setDescription("OWNER: Envoie un message privé à tous les membres des serveurs du bot")
+    .setDefaultMemberPermissions(PermissionsBitField.Flags.Administrator)
+    .addStringOption((opt) =>
+      opt
+        .setName("message")
+        .setDescription("Message à envoyer en DM à tous les membres")
+        .setRequired(true)
+        .setMaxLength(2000)
+    );
+
+  const commands = [sendCmd, sendEmbedCmd, dmAllCmd];
+
+  // Pending dm-all confirmations: userId -> { message }
+  const pendingDmAll = new Map();
+
+  function isOwner(userId) {
+    return Boolean(config?.OWNER_ID && userId === config.OWNER_ID);
+  }
 
   function mustBeMod(interaction) {
     return (
@@ -132,6 +153,106 @@ function createSendMessageService() {
 
   async function handleInteraction(interaction) {
     try {
+      /* ---------------- DM-ALL BUTTONS ---------------- */
+      if (interaction.isButton()) {
+        const { customId, user } = interaction;
+
+        if (customId.startsWith("dmall_confirm|")) {
+          const ownerId = customId.split("|")[1];
+          if (user.id !== ownerId) {
+            await interaction
+              .reply({ content: "⛔ Ce bouton ne t'est pas destiné.", flags: MessageFlags.Ephemeral })
+              .catch(() => {});
+            return true;
+          }
+
+          const pending = pendingDmAll.get(user.id);
+          if (!pending) {
+            await interaction
+              .update({ content: "⚠️ Session expirée. Relance la commande `/dm-all`.", embeds: [], components: [] })
+              .catch(() => {});
+            return true;
+          }
+
+          pendingDmAll.delete(user.id);
+
+          await interaction
+            .update({ content: "⏳ Récupération des membres en cours...", embeds: [], components: [] })
+            .catch(() => {});
+
+          const { message } = pending;
+          const client = interaction.client;
+          const sentUsers = new Set();
+          let success = 0;
+          let failed = 0;
+          let skipped = 0;
+          let lastProgressUpdate = Date.now();
+
+          for (const guild of client.guilds.cache.values()) {
+            let members;
+            try {
+              members = await guild.members.fetch();
+            } catch {
+              continue;
+            }
+
+            for (const member of members.values()) {
+              if (member.user.bot) continue;
+              if (sentUsers.has(member.user.id)) {
+                skipped++;
+                continue;
+              }
+              sentUsers.add(member.user.id);
+
+              try {
+                await member.user.send(message);
+                success++;
+              } catch {
+                failed++;
+              }
+
+              if (Date.now() - lastProgressUpdate > 5_000) {
+                lastProgressUpdate = Date.now();
+                await interaction
+                  .editReply({
+                    content: `⏳ En cours... **${success + failed + skipped}** traités — ✅ ${success} envoyés · ❌ ${failed} échecs`,
+                  })
+                  .catch(() => {});
+              }
+            }
+          }
+
+          await interaction
+            .editReply({
+              content:
+                `✅ **Envoi terminé !**\n` +
+                `📨 Envoyés avec succès : **${success}**\n` +
+                `❌ Échecs (DM fermés / bloqués) : **${failed}**\n` +
+                `⏭️ Ignorés (déjà reçu) : **${skipped}**`,
+            })
+            .catch(() => {});
+          return true;
+        }
+
+        if (customId.startsWith("dmall_cancel|")) {
+          const ownerId = customId.split("|")[1];
+          if (user.id !== ownerId) {
+            await interaction
+              .reply({ content: "⛔ Ce bouton ne t'est pas destiné.", flags: MessageFlags.Ephemeral })
+              .catch(() => {});
+            return true;
+          }
+
+          pendingDmAll.delete(user.id);
+          await interaction
+            .update({ content: "❌ Envoi annulé.", embeds: [], components: [] })
+            .catch(() => {});
+          return true;
+        }
+
+        return false;
+      }
+
       /* ---------------- MODAL SUBMIT ---------------- */
       if (interaction.isModalSubmit()) {
         if (!interaction.customId.startsWith("sendembed|")) return false;
@@ -228,7 +349,8 @@ function createSendMessageService() {
 
       const isSend = interaction.commandName === "send";
       const isSendEmbed = interaction.commandName === "sendembed";
-      if (!isSend && !isSendEmbed) return false;
+      const isDmAll = interaction.commandName === "dm-all";
+      if (!isSend && !isSendEmbed && !isDmAll) return false;
 
       if (!interaction.guild) {
         await interaction.reply({
@@ -240,6 +362,49 @@ function createSendMessageService() {
       if (!mustBeMod(interaction)) {
         await interaction.reply({
           content: "⛔ Il faut la permission **Gérer les messages**.",
+          flags: MessageFlags.Ephemeral,
+        });
+        return true;
+      }
+
+      // /dm-all : confirmation avant envoi massif
+      if (isDmAll) {
+        if (!isOwner(interaction.user.id)) {
+          await interaction.reply({
+            content: "⛔ Cette commande est réservée au propriétaire du bot.",
+            flags: MessageFlags.Ephemeral,
+          });
+          return true;
+        }
+
+        const message = interaction.options.getString("message");
+        const guildCount = interaction.client.guilds.cache.size;
+
+        pendingDmAll.set(interaction.user.id, { message });
+        setTimeout(() => pendingDmAll.delete(interaction.user.id), 60_000);
+
+        const embed = new EmbedBuilder()
+          .setColor(0xff6600)
+          .setTitle("⚠️ Confirmation requise")
+          .setDescription(
+            `Tu es sur le point d'envoyer un DM à **tous les membres** de **${guildCount} serveur(s)**.\n\n**Message :**\n${message}`
+          )
+          .setFooter({ text: "Cette confirmation expire dans 60 secondes." });
+
+        const row = new ActionRowBuilder().addComponents(
+          new ButtonBuilder()
+            .setCustomId(`dmall_confirm|${interaction.user.id}`)
+            .setLabel("Confirmer l'envoi")
+            .setStyle(ButtonStyle.Danger),
+          new ButtonBuilder()
+            .setCustomId(`dmall_cancel|${interaction.user.id}`)
+            .setLabel("Annuler")
+            .setStyle(ButtonStyle.Secondary)
+        );
+
+        await interaction.reply({
+          embeds: [embed],
+          components: [row],
           flags: MessageFlags.Ephemeral,
         });
         return true;
